@@ -18,11 +18,14 @@ namespace IngameScript
         {
             // ── 方块引用 ──────────────────────────────────────────────────────
             List<IMyGravityGenerator> Gravs;
+            IMyShipController _cockpit;  // 用于每帧实时更新 _rm
+            string _front;
 
             // ── 重力发生器方向映射 ─────────────────────────────────────────────
             Base6Directions.Direction[] GravOrientation;
 
             // ── 旋转后的驾驶舱参考矩阵（支持非前向安装朝向）────────────────────
+            // 每帧由 Apply() 实时重建，确保转向后仍正确投影速度
             MatrixD _rm;
 
             // ── 写入预算状态数组 ───────────────────────────────────────────────
@@ -48,8 +51,10 @@ namespace IngameScript
                              List<IMyGravityGenerator> gravs,
                              string front = "Front")
             {
-                Gravs = gravs;
-                _rm   = GetRotatedMatrix(cockpit.WorldMatrix, front);
+                Gravs    = gravs;
+                _cockpit = cockpit;
+                _front   = front;
+                _rm      = GetRotatedMatrix(cockpit.WorldMatrix, front);
 
                 // 处理重力发生器方向映射
                 GravOrientation = new Base6Directions.Direction[Gravs.Count];
@@ -112,6 +117,9 @@ namespace IngameScript
             public void Apply(Vector3 moveIndicator, Vector3D worldVel, bool dampenersOn,
                               double maxAccel, double stopThreshold, double dt)
             {
+                // 每帧实时重建参考矩阵，确保飞船转向后速度投影仍正确
+                _rm = GetRotatedMatrix(_cockpit.WorldMatrix, _front);
+
                 // 世界系速度 → 驱动器局部坐标（X=前后, Y=左右, Z=上下）
                 Vector3D localVel = new Vector3D(
                     Vector3D.Dot(worldVel, _rm.Forward),
