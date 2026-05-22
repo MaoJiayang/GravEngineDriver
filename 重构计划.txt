@@ -1,0 +1,239 @@
+重力引擎驱动脚本重构计划
+==============================
+版本：v2（输入驱动 + 独立阻尼 + 写入预算）
+日期：2026-05-23
+
+
+一、需求摘要
+--------------
+1. 脱离推进器检测，改用驾驶舱 MoveIndicator（WASD/QE 键盘输入）驱动出力
+2. 惯性阻尼完全独立实现，仅与 DampenersOverride 开关同步，不依赖任何推进器状态
+   - 阻尼策略：每轴在停止前最大力量输出
+   - 停止预测：帧级别速度预测，避免过零超调
+3. 每帧运行（Update1）保证响应，同时通过写入预算控制性能尖峰
+
+
+二、与当前版本的差异
+----------------------
+
+2.1 删除的内容
+  - List<IMyThrust> Thrusters 字段及其 GetBlocks 逻辑
+  - GravDrive 构造函数的 Thrusters 参数
+  - GravDrive 内的全部推进器字段：
+      ThrustForward / Backward / Left / Right / Up / Down（6个引用）
+      ThrustOrientation[]（方向映射数组）
+  - 原 GravSyncWithThrusters() 方法（以推进器比例为输入）
+  - 跳帧机制（skip / 备选跳过帧 / skip 计数器）：
+    原本靠跳帧降低每帧计算量；现在所有耗时操作通过写入预算队列平摊到每帧，
+    控制量计算本身极廉价，因此每帧都运行，彻底删除跳帧逻辑。
+  - 参数管理器中的 速度阈值 / 比例阈值 / 推力倍率 / 操控增益 / 跳过帧 / 备选跳过帧
+    （这些均与推进器模型或旧跳帧机制绑定）
+  - 参数管理器中的 额外重力（Vector3D 静态偏移量）：
+    新的自观测阻尼系统每帧测量合力（含行星引力），阻尼逻辑会自动对抗重力以维持零速度，
+    无需用户手动填写补偿量。重力补偿由阻尼段隐式完成。
+  - Update() 中基于速度的线性 Multiplier 计算逻辑
+
+2.2 新增的内容
+  GravDrive 类：
+  - prevLocalVel：Vector3D，上一帧局部系速度（用于观测加速度）
+  - obsAccelLocal：Vector3D，观测到的局部系加速度（自校准，无需知道质量）
+  - gravState[]：(期望值, 已写入值) 对数组，支持脏检测与写入预算
+  - Apply(localInput, localVelocity, dampenersOn)：新的统一出力入口
+      localInput：来自 MoveIndicator 的归一化局部系输入方向
+      localVelocity：驾驶舱局部系速度（调用方转换）
+      dampenersOn：当前 DampenersOverride 值
+  - FlushWrites(maxCount)：按优先级将脏的重力发生器写入硬件，每帧最多处理 maxCount 个
+
+  Program 类：
+  - 去掉 Thrusters 列表，GetBlocks() 简化
+  - Update() 中增加 localVelocity 计算（世界系 → 局部系投影）
+  - Update() 中调用 Drive.FlushWrites() 消费写入队列
+
+  参数管理器：
+  - 新增 最大出力加速度（m/s²）：阻尼/主动驱动时的满功率值（默认 20）
+  - 新增 停止阈值（m/s）：速度低于此值时停止出力，避免低速抖振（默认 0.05）
+  - 新增 每帧最大写入数：每帧处理的重力发生器写入上限（默认 30）
+  - 删除 速度阈值 / 比例阈值 / 推力倍率 / 操控增益（这些与推进器模型绑定）
+
+2.3 保留不变的内容
+  - GravDrive 的方向识别逻辑（构造函数 + GravOrientation[]）
+  - GetRotatedMatrix() 朝向支持
+  - SetGravOverride(Vector3D) 底层写入方法（作为内部实现）
+  - 参数管理器框架（注册表、序列化、读写 CustomData）
+  - 指令系统（SwitchGrav / UpdateBlocks / ChangeFacing / SetFacing 等）
+
+
+三、可行性评估
+----------------
+
+3.1 MoveIndicator 替代推进器
+  结论：✅ 完全可行
+  依据：IMyShipController.MoveIndicator (Vector3) 直接暴露玩家/自动驾驶的方向输入：
+    Z 分量：前(+) / 后(-)
+    X 分量：右(+) / 左(-)
+    Y 分量：上(+) / 下(-)
+  注意：文档明确说明"Values can be very large with high controller sensitivity"，
+  必须 Clamp 到 [-1, 1] 或 Normalize 后再使用，不能直接当比例值。
+
+3.2 独立惯性阻尼（不依赖推进器，不引入 PID）
+  结论：✅ 可行，关键在于加速度自观测
+
+  已知量：
+  - DampenersOverride → 是否应该阻尼
+  - GetShipVelocities().LinearVelocity → 世界系速度（每帧可读）
+
+  未知量：
+  - 我们实际施加了多大加速度（不知道人工质量块的质量比例）
+
+  解法：加速度自观测（参考 BlockMotionTracker 的 UpdateAcceleration 模式）
+  每帧保存上一帧局部系速度 prevLocalVel，当前帧读取 curLocalVel，
+  obsAccelLocal = (curLocalVel - prevLocalVel) / dt
+  这天然包含了重力发生器的出力效果，无需知道质量，完全自校准。
+
+  帧级速度预测（停止超调防护）：
+  预测下一帧速度 = curVel_axis + obsAccelLocal_axis * dt
+  若 curVel_axis 与预测值 异号 → 本帧该轴停止出力（即将过零）
+  
+  低速死区：
+  |vel_axis| < 停止阈值 → 直接停止该轴出力，防止低速抖振
+  
+  无 PID 的最大力量输出逻辑（每轴独立）：
+    if (阻尼开启 AND 无输入 AND 速度在死区外):
+        if (预测下一帧不过零):
+            出力 = 最大出力加速度 × -sign(vel_axis)  // 全力刹车
+        else:
+            出力 = 0  // 已接近零，停止
+    else if (有输入):
+        出力 = 最大出力加速度 × sign(input_axis)  // 全力跟随输入
+
+  自观测的一个限制：第0帧和刚切换模式时 obsAccelLocal 为零（无历史），
+  此时预测 = curVel，不会误判过零，保守处理即可。
+
+3.3 每帧运行 + 性能优化
+  结论：✅ 可行
+
+  性能分析：
+  - 控制量计算（投影/乘除/比较）：每帧 O(1)，极廉价
+  - 读取驾驶舱速度：每帧 1 次，廉价
+  - 写入 GravityAcceleration：SE 块属性写入，非零成本，批量写 N 个时有尖峰风险
+
+  参考 射击需求处理器 的写入预算模式：
+  - 每帧重新计算所有重力发生器期望值（廉价，纯数学）
+  - 维护 (期望值, 已写入值) 对 + 脏标志
+  - 排序依据：|期望值 - 已写入值| 最大的优先处理
+  - 每帧最多写入 N 个（N 由参数管理器控制，默认 8）
+  - 未写入的下帧继续，保证最终一致性
+
+  效果：大量重力发生器时不产生单帧尖峰，最重要的变化（delta 最大）最先生效，
+  略微落后的发生器在下几帧内跟上，对飞行体验影响极小。
+
+  N 通过 参数.每帧最大写入数 用户配置，默认 30（对于普通飞船的重力发生器数量，
+  30 意味着几乎每帧全量更新，只在极大型舰船上才真正起到限流作用）。
+
+
+四、简要方案
+--------------
+
+4.1 GravDrive.Apply() 内部逻辑（三段式，每轴独立）
+
+  输入处理段：
+    将 MoveIndicator 映射/归一化为 [-1, 1] 的局部系输入向量
+    有输入 → 该轴期望出力 = 最大出力加速度 × clamp(input_axis, -1, 1)
+
+  阻尼段（无输入轴 AND DampenersOverride=true）：
+    速度在死区内 → 期望出力 = 0（含写入零以关闭重力发生器）
+    预测下一帧过零 → 期望出力 = 0
+    否则 → 期望出力 = 最大出力加速度 × -sign(vel_axis)
+
+  静止段（无输入轴 AND DampenersOverride=false）：
+    期望出力 = 0（不施加任何力，保持惯性漂移）
+
+  最后：更新 prevLocalVel = curLocalVel，obsAccelLocal 自动更新
+
+4.2 FlushWrites() 写入预算
+
+  遍历 gravState[]，按 |期望值 - 已写入值| 降序排序（或用优先队列近似）
+  每帧写入前 N 个脏项，其余留到下帧
+  写入后更新 已写入值，清除脏标志
+
+4.3 世界系 → 局部系速度转换（在 Program.Update 中完成）
+
+  读取 LinearVelocity（世界系），通过驾驶舱旋转矩阵（已旋转为 rm）投影：
+    localVel.X = Dot(worldVel, rm.Forward)
+    localVel.Y = Dot(worldVel, rm.Left)
+    localVel.Z = Dot(worldVel, rm.Up)
+  传入 Drive.Apply()
+
+4.4 文件结构变化
+
+  Program.cs    → 删推进器相关，添加 localVel 计算，调用 Drive.FlushWrites()
+  GravDrive.cs  → 删推进器字段/方法，添加 Apply() + FlushWrites() + gravState[]
+  参数管理器.cs → 调整参数（见 2.2）
+
+
+五、性能显示器
+-----------------
+
+5.1 当前状态
+  现有代码只有基础 Echo()（重力状态、速度、发生器数量），无耗时与指令数监测。
+
+5.2 需要展示的指标
+
+  运行性能类：
+  - 单次耗时（微秒）：Runtime.LastRunTimeMs × 1000
+  - 滚动平均耗时：N 帧（建议 60 帧）窗口的移动平均，平滑偶发尖峰
+  - 指令数使用率：Runtime.CurrentInstructionCount / Runtime.MaxInstructionCount × 100%
+  
+  写入预算类：
+  - 本帧写入数 / 每帧最大写入数（如 "写入：3/8"）
+  - 待写入队列长度（剩余脏项数）
+  
+  飞行状态类（已有，保留并扩展）：
+  - 当前速度（m/s）
+  - 局部系速度三分量（X/Y/Z m/s），便于调试阻尼效果
+  - 观测加速度三分量（来自 obsAccelLocal），便于验证自校准是否正常
+  - 阻尼开关状态（DampenersOverride）
+  - 当前输入向量（MoveIndicator 归一化后的值）
+
+5.3 实现方案
+
+  刷新频率：
+  显示器更新本身有开销（字符串拼接 + Echo），不需要每帧刷新。
+  建议每 参数.显示刷新间隔（默认 6 tick，约 10 Hz）更新一次，与控制循环解耦。
+
+  滚动平均实现：
+  参数管理器新增 滚动窗口大小（默认 60）。
+  维护 double[] 循环缓冲区 + 当前窗口总和，O(1) 每帧更新。
+
+  输出目标（两种，均支持）：
+  A. Echo()：直接输出到可编程方块详情面板，零额外方块依赖，实现简单
+  B. LCD 面板：按名称查找 IMyTextPanel，写入 WriteText()，支持远程查看
+  两者可共存：Echo() 始终输出，LCD 面板在配置了名称时额外推送。
+
+  参数管理器新增参数：
+  - 显示刷新间隔（int，默认 6）
+  - 滚动窗口大小（int，默认 60）
+  - 性能显示面板名称（string，默认 ""，空字符串表示不使用 LCD）
+
+5.4 新增内容
+  - 循环缓冲区字段（double[] _rttBuf, int _rttHead, double _rttSum）
+  - UpdateDisplay() 方法：每 N 帧调用，拼接状态字符串，写 Echo + 可选 LCD
+  - 可选：IMyTextPanel _lcdPanel 字段（按参数名称查找，与 GetBlocks 一并初始化）
+
+
+六、遗留问题与风险
+--------------------
+
+1. MoveIndicator 在无人操控时（AI/自动飞行）是否有值？
+   RemoteControl 可以写 MoveIndicator，但 PB 无法直接写入驾驶舱的 MoveIndicator。
+   当前脚本不处理 AI 模式，此点暂无影响。
+   [TODO] 后续若需要支持 AI/无人机模式，需要验证 RemoteControl.MoveIndicator 的行为。
+
+2. obsAccelLocal 包含了所有外力（推进器、行星引力、撞击等），
+   在行星大气内或受到外力冲击时预测可能不准。
+   缓解：停止阈值死区作为兜底，预测失准只影响"过零时机"，不影响整体阻尼方向。
+
+3. 写入预算为 N 时，如果重力发生器数量远大于 N，响应存在多帧延迟。
+N 由参数 每帧最大写入数 控制（默认 30），用户可根据舰船规模调整。
+  一般飞船重力发生器少于 30 个时，此参数无实际效果（全帧更新），
+  只在超大型舰船时才真正起到削峰作用。
