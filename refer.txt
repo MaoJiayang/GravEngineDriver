@@ -1,0 +1,1019 @@
+		/*
+		可用指令
+		UpdateBlocks:立刻更新方块列表
+		SwitchGrav:开关推进器同步重力引擎
+		SwitchAim:开关自瞄
+		SwitchHPC:开关预判瞄准
+
+		SetProjectileSpeed <Int>:直接设定当前武器的弹速,加特林为400,火炮/机炮/突击炮为500,磁轨炮为2000
+		ChangeProjectileSpeed:将当前武器弹速设定为默认值,再次按下可在两种默认值之间切换
+		
+		SetSkip <Int>:设定跳过帧, 如设定为6则表示每秒运行10次(60/6)
+		ChangeSkip:将当前跳过帧设定为默认值,再次按下可在两种默认值之间切换
+
+		SetRoll <Float>:设定交战时的自动滚转速率, 建议取值范围0到±10
+		ChangeRoll:将当前自动滚转速率设定为默认值,再次按下可在两种默认速率之间切换
+
+		SetDistance <Int>:设定交战距离,交战时飞船会将自身与目标的距离控制在此值附近,设为0则不进行距离控制
+		ChangeDistance:将当前交战距离设定为默认值,再次按下可在两种默认距离之间切换
+
+		SetFacing <String>:设定当前飞船朝向,可传入Front, Back, Left, Right, Up, Down. 留空或传入其他值则默认将朝向设为前方(Front)
+		ChangeFacing:将当前飞船朝向设定为默认值,再次按下可在两种预设朝向之间切换
+
+		SetSpread <Float>:设定炮塔随机瞄准角度, 建议取值范围0到1.5
+		ChangeSpread:将当前炮塔随机瞄准角度设定为默认值,再次按下可在两种默认角度之间切换
+
+		FireSalvo <String>:使轮射分组内其中一个武器开启射击
+		StopSalvo <String>:停止轮射分组内所有武器射击,留空则关闭所有分组射击
+
+		FireAtHPC:开关炮塔攻击预测落点
+		*/
+
+		bool IsWC = false;//是否为WeaponCore武器
+
+		const double PrimaryWeaponSpeed = 1200;//主武器弹速,加特林为400,火炮/机炮/突击炮为500,磁轨炮为2000
+		const double SecondaryWeaponSpeed = 450;//副武器弹速
+		double TurretWeaponSpeed = 500;//炮塔弹速
+
+		const float DefaultTurretSpread = 1f;//随机瞄准(弹道扩散)角度(度),如:设置为1则会在开启攻击预测落点后使炮塔的俯仰轴/偏航轴随机转动-1~1度
+		const float AltTurretSpread = 0f;//备选扩散角度
+
+		const double DefaultDistance = 600;//距离敌方舰船的默认距离(米),程序会将自身与目标的距离控制在此值附近
+		const double AltDistance = 1350;//距离敌方舰船的备选距离
+
+		const double DefaultRoll = 7;//默认自动滚转速度
+		const double AltRoll = -7;//备选自动滚转速度
+
+		const string DefaultFacing = "Front";//默认预设朝向,用于SwitchFacing指令
+		const string AltFacing = "Left";//备选预设朝向,用于SwitchFacing指令
+
+		const int DefaultSkip = 6;//跳过帧, 6表示每秒运行10次(60/6)
+		const int AltSkip = 1;//跳过帧, 1表示每秒运行60次(60/1)
+		const int UpdateSkip = 600;//获取方块跳过帧, 600表示每10秒运行1次(60/600)
+
+		const double SpeedLimit = 100;//速度上限
+		Vector3D CombatGravOverride = new Vector3D(0,0,-20);//交战重力驱动增量(前后,左右,上下),如:设为0,0,1会使所有上下方向的重力发生器在交战时产生向上的1m/s^2的出力
+		const float SyncThreshold = 1f;  //0-100, 飞船在此速度以下时重力驱动不工作
+		const float ProportionThreshold = 10.0f;  //飞船低于此速度,重力引擎功率将按比例输出
+
+		string GravGroupName = "Grav";//重力发生器分组名称,留空或分组中不含重力发生器则获取网格中的所有重力发生器
+		string CPGroupName = "CP";//驾驶舱分组名称,留空或分组中不含驾驶舱则获取网格中的所有驾驶舱
+		string GyroGroupName = "FCS";//自瞄陀螺仪分组名称,若分组中不含陀螺仪则获取方块名称内含有分组名称的陀螺仪
+		string TurretGroupName = "Designators";//索敌炮塔分组名称,用于获取目标,留空或分组中不含炮塔则获取网格中的所有炮塔
+		string HPCTurretGroupName = "HPC_Turrets";//预判攻击炮塔分组名称,根据程序中的预测落点函数修正弹道.注意:开启攻击预测落点功能后此分组内的炮塔无法索敌
+
+		string ManualSalvoGroupPrefix = "ManualSalvo";//手动轮射分组名称前缀
+
+		bool AutoAim = true;//自动瞄准
+		bool AimAtHPC = true;//预判瞄准
+		bool FireAtHPC = false;//炮塔攻击预测落点
+
+		// ---- 瞄准PID算法参数 ------ //
+		const double R = 1; //瞄准精度，单位：度。用来是否瞄准，以便其他动作判断。不影响瞄准的效率。当瞄准块的正前方向量与瞄准块和目标的连线向量夹角小于这个值时，整个系统判定瞄准了目标。
+		const int T = 1;   //PID 采样周期（单位：帧），周期越小效果越好，但太小的周期会让积分系数难以发挥效果
+		const double P = 1; //比例系数：可以理解为整个PID控制的总力度，建议范围0到1.2，1是完全出力。
+		const double I = 1.1; //积分系数：增加这个系数会让静态误差增加（即高速环绕误差），但会减少瞄准的震荡。反之同理
+		const double D = 7; //微分系数：增加这个系数会减少瞄准的震荡幅度，但会加剧在小角度偏差时的震荡幅度。反之同理
+
+		List<IMyGravityGenerator> Grav = new List<IMyGravityGenerator>();
+		List<IMyShipController> Cs = new List<IMyShipController>();
+		List<IMyRemoteControl> RC = new List<IMyRemoteControl>();
+		List<IMyThrust> Thrusters = new List<IMyThrust>();
+		List<IMyTerminalBlock> Designators = new List<IMyTerminalBlock>();
+		List<IMyTerminalBlock> HPCTurrets = new List<IMyTerminalBlock>();
+		List<IMyGyro> Gyros = new List<IMyGyro>();
+
+		List<string> ManualSalvoGroupNames = new List<string>();
+		List<List<IMyUserControllableGun>> ManualSalvoGroupBlocks = new List<List<IMyUserControllableGun>>();
+		List<int> ManualSalvoGroupIndices = new List<int>();
+
+
+		IMyShipController Cs0;
+
+		double timetick = 0;
+		//double speed;
+		int skip;
+		double ProjectileSpeed;
+		double Distance;
+		double dist;
+		double Roll;
+		string ShipFront;
+		float TurretSpread;
+		IMyBlockGroup GravGroup;
+		IMyBlockGroup CPGroup;
+		IMyBlockGroup GyroGroup;
+		IMyBlockGroup TurretGroup;
+		IMyBlockGroup HPCTurretGroup;
+		Vector3D Pos;
+		Vector3D LastPos;
+		Vector3D TargetAcc;
+		Vector3D TargetVelocity;
+		Vector3D LTV;
+		Vector3D Vs;
+
+		Vector3D HP1;
+		Vector3D HP2;
+		//Vector3D HPF;
+
+		Vector3D PlayerPos;
+		Random rand;
+		public Program()
+		{
+			if(IsWC)
+			{
+				api = new WcPbApi();
+				try
+				{
+					api.Activate(Me);
+				}
+				catch (Exception e)
+				{
+					Echo("WeaponCore not detected, using default mode...");
+					IsWC = false;
+				}
+			}
+
+			GetBlocks();
+			Runtime.UpdateFrequency = UpdateFrequency.Update1;
+			skip = DefaultSkip;
+			ProjectileSpeed = PrimaryWeaponSpeed;
+			Distance = DefaultDistance;
+			ShipFront = DefaultFacing;
+			Roll = DefaultRoll;
+			TurretSpread = DefaultTurretSpread;
+			dist = Distance;
+			rand = new Random();
+		}
+
+		void GetBlocks()
+		{
+			GravGroup = GridTerminalSystem.GetBlockGroupWithName(GravGroupName);
+			if (GravGroup != null) GravGroup.GetBlocksOfType(Grav);
+			if (GravGroup == null || !Grav.Any()) GridTerminalSystem.GetBlocksOfType(Grav);
+			
+
+			CPGroup = GridTerminalSystem.GetBlockGroupWithName(CPGroupName);
+			if (CPGroup != null) CPGroup.GetBlocksOfType(Cs, b => b.CanControlShip && b.IsFunctional);
+			if (CPGroup == null || !Cs.Any()) GridTerminalSystem.GetBlocksOfType(Cs, b => b.CanControlShip && b.IsFunctional);
+
+			TurretGroup = GridTerminalSystem.GetBlockGroupWithName(TurretGroupName);
+			if (TurretGroup != null) TurretGroup.GetBlocksOfType(Designators, b => IsWC ? api.HasCoreWeapon(b) : b is IMyLargeTurretBase);
+			if (TurretGroup == null || !Designators.Any()) GridTerminalSystem.GetBlocksOfType(Designators, b => IsWC ? api.HasCoreWeapon(b) : b is IMyLargeTurretBase);
+
+			HPCTurretGroup = GridTerminalSystem.GetBlockGroupWithName(HPCTurretGroupName);
+			if (HPCTurretGroup != null) HPCTurretGroup.GetBlocksOfType(HPCTurrets, b => IsWC ? api.HasCoreWeapon(b) : b is IMyLargeTurretBase);
+
+			Cs0 = Cs.Find(x => x.IsUnderControl); 
+			if (Cs0 == null) Cs0 = Cs[0];
+
+			GyroGroup = GridTerminalSystem.GetBlockGroupWithName(GyroGroupName);
+			if (GyroGroup != null) GyroGroup.GetBlocksOfType(Gyros);
+			if (GyroGroup == null || !Gyros.Any()) GridTerminalSystem.GetBlocksOfType(Gyros, b => b.CustomName.Contains("GyroGroupName"));
+
+			List<IMyBlockGroup> groups = new List<IMyBlockGroup>();
+			GridTerminalSystem.GetBlockGroups(groups, g => g.Name.StartsWith(ManualSalvoGroupPrefix));
+			foreach (var group in groups)
+			{
+				List<IMyUserControllableGun> gun = new List<IMyUserControllableGun>();
+				group.GetBlocksOfType(gun, b => !IsWC && b.IsFunctional);
+				if (gun.Any())
+				{
+					string name = group.Name.Substring(ManualSalvoGroupPrefix.Length).Trim();
+					if (ManualSalvoGroupNames.Contains(name))
+					{
+						ManualSalvoGroupBlocks[ManualSalvoGroupNames.IndexOf(name)] = gun;
+					}
+					else
+					{
+						ManualSalvoGroupNames.Add(name);
+						ManualSalvoGroupBlocks.Add(gun);
+						ManualSalvoGroupIndices.Add(0);
+					}
+				}
+			}
+
+
+			GridTerminalSystem.GetBlocksOfType(RC);
+			GridTerminalSystem.GetBlocksOfType(Thrusters);
+
+		}
+
+		void InitShip()
+		{
+			MyShip = new Ship(Cs0, Gyros, Thrusters, Grav, R, T, P, I, D, ShipFront);
+		}
+
+		Ship MyShip;
+		bool GravOn = true;
+		public void Main(string arg, UpdateType updateSource)
+		{
+
+			if (timetick % skip == 0 || updateSource != UpdateType.Update1)
+			{
+				Update();
+			}
+			if (timetick % UpdateSkip == 0 || arg == "UpdateBlocks")
+			{
+				GetBlocks();
+				InitShip();
+			}
+			if (arg == "SwitchGrav") GravOn = !GravOn;
+			if (arg == "SwitchAim") AutoAim = !AutoAim;
+			if (arg == "SwitchHPC") AimAtHPC = !AimAtHPC;
+
+			if (arg == "ChangeProjectileSpeed") ProjectileSpeed = ProjectileSpeed == PrimaryWeaponSpeed ? SecondaryWeaponSpeed : PrimaryWeaponSpeed;
+			if (arg.StartsWith("SetProjectileSpeed")) ProjectileSpeed = Convert.ToInt32(arg.Split(' ')[1]);
+
+			if (arg == "ChangeSkip") skip = skip == DefaultSkip ? AltSkip : DefaultSkip;
+			if (arg.StartsWith("SetSkip")) skip = Convert.ToInt32(arg.Split(' ')[1]);
+
+			if (arg == "ChangeRoll") Roll = Roll == DefaultRoll ? AltRoll : DefaultRoll;
+			if (arg.StartsWith("SetRoll")) Roll = Convert.ToSingle(arg.Split(' ')[1]);
+
+			if (arg == "ChangeDistance") Distance = Distance == DefaultDistance ? AltDistance : DefaultDistance;
+			if (arg.StartsWith("SetDistance")) Distance = Convert.ToInt32(arg.Split(' ')[1]);
+
+			if (arg == "ChangeSpread") TurretSpread = TurretSpread == DefaultTurretSpread ? AltTurretSpread : DefaultTurretSpread;
+			if (arg.StartsWith("SetSpread")) TurretSpread = Convert.ToInt32(arg.Split(' ')[1]);
+
+			if (arg == "ChangeFacing")
+			{
+				ShipFront = ShipFront == DefaultFacing ? AltFacing : DefaultFacing;
+				InitShip();
+			}
+
+			if (arg.StartsWith("SetFacing"))
+			{
+				ShipFront = arg.Split(' ')[1];
+				InitShip();
+			}
+
+			if (arg.StartsWith("FireAtHPC")) 
+			{
+				if (FireAtHPC)
+				{
+					Designators.ForEach(x => (x as IMyLargeTurretBase).ResetTargetingToDefault());
+					FireAtHPC = false;
+				}
+				else FireAtHPC = true;
+			}
+
+			if (arg.StartsWith("FireSalvo"))
+			{
+				string name = arg.Substring(arg.IndexOf(' ')).Trim();
+
+				if (ManualSalvoGroupNames.Contains(name))
+				{
+					int index = ManualSalvoGroupNames.IndexOf(name);
+					if (ManualSalvoGroupIndices[index] >= ManualSalvoGroupBlocks[index].Count - 1)
+						ManualSalvoGroupIndices[index] = 0;
+					else ManualSalvoGroupIndices[index]++;
+
+					if (ManualSalvoGroupBlocks[index].ElementAt(ManualSalvoGroupIndices[index]) != null)
+						ManualSalvoGroupBlocks[index].ElementAt(ManualSalvoGroupIndices[index]).Shoot = true;
+				}
+			}
+
+			if (arg.StartsWith("StopSalvo"))
+			{
+				string name = arg.IndexOf(' ') < 0 ? "" : arg.Substring(arg.IndexOf(' ')).Trim();
+				if (name != "")
+				{
+					if (ManualSalvoGroupNames.Contains(name))
+					{
+						foreach (var block in ManualSalvoGroupBlocks[ManualSalvoGroupNames.IndexOf(name)])
+						{
+							block.Shoot = false;
+						}
+					}
+				}
+				else
+				{
+					foreach (var blocks in ManualSalvoGroupBlocks)
+					{
+						foreach (var block in blocks)
+						{
+							block.Shoot = false;
+						}
+					}
+				}
+
+			}
+
+			timetick++;
+		}
+
+		public void Update()
+		{
+			Cs0 = Cs.Find(x => x.IsUnderControl);
+			if (Cs0 == null) Cs0 = Cs[0];
+
+			if (MyShip == null || MyShip.Debug != "Normal")
+			{
+				InitShip();
+				Echo(MyShip.Debug);
+				return;
+			}
+			Ship.timetick++;
+			Echo(Ship.timetick.ToString());
+
+
+
+			if (Cs0 == null) Cs0 = Cs[0];
+
+			List<MyDetectedEntityInfo> tgt = new List<MyDetectedEntityInfo>();
+			for (int i = 0; i < Designators.Count; i++)
+			{
+				MyDetectedEntityInfo temp = IsWC ? api.GetWeaponTarget(Designators[i]).Value : (Designators[i] as IMyLargeTurretBase).GetTargetedEntity();
+				if (!temp.IsEmpty() && temp.Type == MyDetectedEntityType.LargeGrid)
+				{
+					tgt.Add(temp);
+				}
+			}
+
+			MyDetectedEntityInfo Target = tgt.Any() ? tgt.Aggregate((a, b) => (a.BoundingBox.Volume > b.BoundingBox.Volume) ? a : b) : new MyDetectedEntityInfo();
+			//TargetVelocity = Target.Velocity;
+
+			Echo($"us:{Runtime.LastRunTimeMs * 1000}");
+			Echo($"Projectile Speed:{ProjectileSpeed}");
+			Echo($"Min.Distance:{Distance}");
+			Echo($"AutoAim:{AutoAim}");
+			Echo($"AimAtHPC:{AimAtHPC}");
+			Echo($"FireAtHPC:" + (IsWC ? "Unsupported" : FireAtHPC.ToString()));
+			if (!IsWC) Echo($"Spread:±{TurretSpread}° ({Math.Round(Math.Tan(TurretSpread * 0.017453) * dist, 3)}m radius @ {Math.Round(dist)}m)\nAvg.Density:{MathHelper.Clamp(Math.Round(HPCTurrets.Count / (Math.PI * Math.Pow(Math.Tan(TurretSpread * 0.017453) * dist, 2)) * 2.5, 3), 0, HPCTurrets.Count)} r/2.5m^2 @ {Math.Round(dist)}m");
+			Echo($"Salvo:" + (IsWC ? "Unsupported" : ""));
+			if (!IsWC)
+			{
+				for (int i = 0; i < ManualSalvoGroupNames.Count; i++)
+				{
+					Echo($"{ManualSalvoGroupNames[i]}:{ManualSalvoGroupIndices[i] + 1}/{ManualSalvoGroupBlocks[i].Count}");
+				}
+
+			}
+
+
+			Vector3D vec = Vector3D.Zero;
+
+			if (!Target.IsEmpty())
+			{
+				dist = Vector3D.Distance(Pos, Cs0.GetPosition());
+				Echo($"distance:{Math.Round(dist)} m");
+				//speed = Cs0.GetShipSpeed();
+				Vs = Cs0.GetShipVelocities().LinearVelocity;
+
+				Pos = Target.Position;
+				TargetVelocity = (Pos - LastPos) * 60 / skip;
+				LastPos = Pos;
+
+				TargetAcc = (TargetVelocity - LTV) * 60 / skip;
+				LTV = TargetVelocity;
+
+				double BulletInitSpeed = ProjectileSpeed;// + speed;
+
+				HP1 = AimAtHPC ? HPC(Cs0.GetPosition(), Vs, Pos, TargetVelocity, TargetAcc, BulletInitSpeed) : Pos;
+				/*
+				HPF = (HP1 - HP2)*(IsServer ? 2 : 20) + HP1;
+				HP2 = HP1;
+				Echo(HPF.ToString());
+				*/
+
+				if (AutoAim) MyShip.AimAtPosition(HP1);
+				else MyShip.SetGyroOverride(false);
+				if (FireAtHPC && !IsWC)
+				{
+					HP2 = HPC(Cs0.GetPosition(), Vs, Pos, TargetVelocity, TargetAcc, TurretWeaponSpeed);
+					if (HPCTurrets.Any()) HPCTurrets.ForEach(x => 
+					{
+						TurretAim(x as IMyLargeTurretBase, HP2);
+						(x as IMyLargeTurretBase).SyncAzimuth();
+						(x as IMyLargeTurretBase).SyncElevation();
+						(x as IMyLargeTurretBase).ShootOnce();
+					}
+					);
+				}
+				//Echo(HP1.ToString());
+				
+				vec = CombatGravOverride;
+				vec.X += Distance > 0 && dist < Distance ? 50 : -50;
+				MyShip.SetGyroValue("Roll", Roll);
+			}
+			else if (RC.Count > 0 && RC[0].GetNearestPlayer(out PlayerPos))
+			{
+				MyShip.AimAtPosition(HPC(RC[0].GetPosition(), RC[0].GetShipVelocities().LinearVelocity, PlayerPos, PlayerPos - LastPos, Vector3D.Zero, SpeedLimit + 10));
+				LastPos = PlayerPos;
+				vec.X = -50;
+				dist = Vector3D.Distance(PlayerPos, RC[0].GetPosition());
+			}
+			else
+			{
+				dist = Distance;
+				MyShip.MotionInit();
+			}
+
+
+			if (GravOn)
+			{
+				if (Cs0.MoveIndicator.Length() > 0.1)
+					MyShip.GravSyncWithThrusters(new Vector3D(10, 10, 10) * Vector3D.Clamp((Vector3D.Abs(Cs0.GetShipVelocities().LinearVelocity) - SyncThreshold) / ProportionThreshold, Vector3D.Zero, Vector3D.One), vec + Vector3D.Normalize(new Vector3D(Cs0.MoveIndicator.Z, Cs0.MoveIndicator.X, -Cs0.MoveIndicator.Y)) * 10);
+				else if (Cs0.GetShipSpeed() > SyncThreshold)
+					MyShip.GravSyncWithThrusters(new Vector3D(10, 10, 10) * Vector3D.Clamp((Vector3D.Abs(Cs0.GetShipVelocities().LinearVelocity) - SyncThreshold) / ProportionThreshold, Vector3D.Zero, Vector3D.One), vec);
+				else
+					MyShip.GravSyncWithThrusters(Vector3D.Zero, vec);
+			}
+			else MyShip.SetGravOverride(Vector3D.Zero);
+		}
+
+
+		void TurretAim(IMyLargeTurretBase gun, Vector3D pos)
+		{
+			double a, e;
+			MatrixD refLookAtMatrix = MatrixD.CreateLookAt(new Vector3D(0, 0, 0), gun.WorldMatrix.Forward, gun.WorldMatrix.Up);
+			Vector3D targetVector = Vector3D.Normalize(Vector3D.TransformNormal(pos - gun.GetPosition(), refLookAtMatrix));
+			Vector3D.GetAzimuthAndElevation(targetVector, out a, out e);
+
+			float r = TurretSpread > 0.05f ? TurretSpread * 0.017453f * ((float)rand.NextDouble() - 0.5f) * 2 : 0;
+			gun.Azimuth = (float)a + r;
+			gun.Elevation = (float)e + r;
+		}
+
+		public static Vector3D HPC(Vector3D Me_Position, Vector3D Me_Velocity, Vector3D Target_Position, Vector3D Target_Velocity, Vector3D Target_Acceleration, double Bullet_Speed)
+		{
+
+			double HitTime = GetTimeToIntercept(Target_Position - Me_Position, Target_Velocity - Me_Velocity, Bullet_Speed);//Vector3D.Distance(Me_Position, Target_Position)/Bullet_Speed;  
+			if (HitTime <= 0.0)
+			{
+				HitTime = -HitTime;
+			}
+			Vector3D IntegratedAccel = 0.5 * Target_Acceleration * HitTime;
+			Vector3D FinalVelocity = (Target_Velocity + IntegratedAccel).Length() > SpeedLimit ? Vector3D.Normalize(Target_Velocity + IntegratedAccel) * SpeedLimit : Target_Velocity + IntegratedAccel;
+			Vector3D HitPosition = Target_Position + (FinalVelocity - Me_Velocity) * HitTime;
+			/*  
+			HitTime = GetTimeToIntercept(HitPosition - Me_Position,Target_Velocity - Me_Velocity,Bullet_Speed);//Vector3D.Distance(HitPosition, Me_Position)/Bullet_Speed;  
+			HitPosition = Target_Position + (Target_Velocity*Velocity_Factor+(0.5*Target_Acceleration*HitTime))*HitTime - Me_Velocity*HitTime;  
+
+			//迭代1次
+			HitTime = GetTimeToIntercept(HitPosition - Me_Position,Target_Velocity - Me_Velocity,Bullet_Speed);//Vector3D.Distance(HitPosition, Me_Position)/Bullet_Speed;  
+			HitPosition = Target_Position + (Target_Velocity*Velocity_Factor+(0.5*Target_Acceleration*HitTime))*HitTime - Me_Velocity*HitTime; 
+		*/
+
+			
+			return HitPosition;
+		}
+
+		static double GetTimeToIntercept(Vector3D deltaPos, Vector3D deltaVel, double projectileVel)
+		{
+			double num = Vector3D.Dot(deltaVel, deltaVel) - projectileVel * projectileVel;
+			double num2 = 2.0 * Vector3D.Dot(deltaVel, deltaPos);
+			double num3 = Vector3D.Dot(deltaPos, deltaPos);
+			double num4 = num2 * num2 - 4.0 * num * num3;
+			if (num4 <= 0.0)
+			{
+				return -1.0;
+			}
+			return 2.0 * num3 / (Math.Sqrt(num4) - num2);
+		}
+
+
+
+
+
+
+		public class Ship
+		{
+			// ----- 静态属性 -----
+			public static int timetick; //帧计时器。注意：这是一个静态变量，使用Ship.timetick访问它，它是这个类共有的变量而不是某个实例化后的飞船特有的。
+
+			// ----- 方块类变量 -----
+			public IMyShipController Cockpit;
+			public List<IMyGyro> Gyroscopes = new List<IMyGyro>();
+			public List<string> gyroYawField = new List<string>();
+			public List<string> gyroPitchField = new List<string>();
+			public List<string> gyroRollField = new List<string>();
+			public List<float> gyroYawFactor = new List<float>();
+			public List<float> gyroPitchFactor = new List<float>();
+			public List<float> gyroRollFactor = new List<float>();
+			public List<IMyThrust> Thrusts = new List<IMyThrust>();
+			public Base6Directions.Direction[] ThrustOrientation;
+			public List<IMyGravityGenerator> Gravs = new List<IMyGravityGenerator>();
+			public Base6Directions.Direction[] GravOrientation;
+			public string ShipFront = "Front";
+			IMyThrust ThrustForward = null;
+			IMyThrust ThrustBackward = null;
+			IMyThrust ThrustLeft = null;
+			IMyThrust ThrustRight = null;
+			IMyThrust ThrustUp = null;
+			IMyThrust ThrustDown = null;
+
+			// ---- 必要配置变量 ----
+			public string Debug = "Normal"; //错误报告，通过这个变量判断是否初始化成功
+
+			// ---- 瞄准PID算法参数 ------
+			public double AimRatio = 2; //瞄准精度，单位：度。用来是否瞄准，以便其他动作判断。不影响瞄准的效率。当瞄准块的正前方向量与瞄准块和目标的连线向量夹角小于这个值时，整个系统判定瞄准了目标。
+			public int AimPID_T = 1; //PID 采样周期（单位：帧），周期越小效果越好，但太小的周期会让积分系数难以发挥效果
+			public double AimPID_P = 1; //比例系数：可以理解为整个PID控制的总力度，建议范围0到1.2，1是完全出力。
+			public double AimPID_I = 10; //积分系数：增加这个系数会让静态误差增加（即高速环绕误差），但会减少瞄准的震荡。反之同理
+			public double AimPID_D = 7; //微分系数：增加这个系数会减少瞄准的震荡幅度，但会加剧在小角度偏差时的震荡幅度。反之同理
+			
+
+			MatrixD GetRotatedMatrix(MatrixD m, string front) 
+			{
+				MatrixD n = m;
+				switch (front)
+				{
+					case "Back":
+						n.Forward = m.Backward;
+						n.Left = m.Right;
+						break;
+					case "Up":
+						n.Forward = m.Up;
+						n.Up = m.Forward;
+						n.Left = m.Right;
+						break;
+					case "Down":
+						n.Forward = m.Down;
+						n.Up = m.Backward;
+						n.Left = m.Right;
+						break;
+					case "Left":
+						n.Backward = m.Right;
+						n.Left = m.Backward;
+						break;
+					case "Right":
+						n.Backward = m.Left;
+						n.Left = m.Forward;
+						break;
+					default:
+						break;
+				}
+				return n;
+			}
+
+
+			// ----- 构造方法 ------
+			// 传入方块后自动处理方块并实例化
+			public Ship()
+			{
+				this.Debug = "Empty Init Ship";
+			}
+			public Ship(IMyShipController Cp, List<IMyGyro> gy, List<IMyThrust> th, List<IMyGravityGenerator> gg, double R, int T, double P, double I, double D, string front = "Front")
+			{
+				Cockpit = Cp;
+				Gyroscopes = gy;
+				Thrusts = th;
+				Gravs = gg;
+				//处理陀螺仪
+				ShipFront = front;
+				MatrixD rm = GetRotatedMatrix(Cockpit.WorldMatrix, ShipFront);
+				for (int i = 0; i < Gyroscopes.Count; i++)
+				{
+					Base6Directions.Direction gyroUp = Gyroscopes[i].WorldMatrix.GetClosestDirection(rm.Up);
+					Base6Directions.Direction gyroLeft = Gyroscopes[i].WorldMatrix.GetClosestDirection(rm.Left);
+					Base6Directions.Direction gyroForward = Gyroscopes[i].WorldMatrix.GetClosestDirection(rm.Forward);
+					switch (gyroUp)
+					{
+						case Base6Directions.Direction.Up: gyroYawField.Add("Yaw"); gyroYawFactor.Add(1f); break;
+						case Base6Directions.Direction.Down: gyroYawField.Add("Yaw"); gyroYawFactor.Add(-1f); break;
+						case Base6Directions.Direction.Left: gyroYawField.Add("Pitch"); gyroYawFactor.Add(1f); break;
+						case Base6Directions.Direction.Right: gyroYawField.Add("Pitch"); gyroYawFactor.Add(-1f); break;
+						case Base6Directions.Direction.Forward: gyroYawField.Add("Roll"); gyroYawFactor.Add(-1f); break;
+						case Base6Directions.Direction.Backward: gyroYawField.Add("Roll"); gyroYawFactor.Add(1f); break;
+					}
+					switch (gyroLeft)
+					{
+						case Base6Directions.Direction.Up: gyroPitchField.Add("Yaw"); gyroPitchFactor.Add(1f); break;
+						case Base6Directions.Direction.Down: gyroPitchField.Add("Yaw"); gyroPitchFactor.Add(-1f); break;
+						case Base6Directions.Direction.Left: gyroPitchField.Add("Pitch"); gyroPitchFactor.Add(1f); break;
+						case Base6Directions.Direction.Right: gyroPitchField.Add("Pitch"); gyroPitchFactor.Add(-1f); break;
+						case Base6Directions.Direction.Forward: gyroPitchField.Add("Roll"); gyroPitchFactor.Add(-1f); break;
+						case Base6Directions.Direction.Backward: gyroPitchField.Add("Roll"); gyroPitchFactor.Add(1f); break;
+					}
+					switch (gyroForward)
+					{
+						case Base6Directions.Direction.Up: gyroRollField.Add("Yaw"); gyroRollFactor.Add(1f); break;
+						case Base6Directions.Direction.Down: gyroRollField.Add("Yaw"); gyroRollFactor.Add(-1f); break;
+						case Base6Directions.Direction.Left: gyroRollField.Add("Pitch"); gyroRollFactor.Add(1f); break;
+						case Base6Directions.Direction.Right: gyroRollField.Add("Pitch"); gyroRollFactor.Add(-1f); break;
+						case Base6Directions.Direction.Forward: gyroRollField.Add("Roll"); gyroRollFactor.Add(-1f); break;
+						case Base6Directions.Direction.Backward: gyroRollField.Add("Roll"); gyroRollFactor.Add(1f); break;
+					}
+
+					//Gyroscopes[i].ApplyAction("OnOff_On");
+				}
+
+				//处理推进器
+				ThrustOrientation = new Base6Directions.Direction[Thrusts.Count];
+				for (int i = 0; i < Thrusts.Count; i++)
+				{
+					if (Thrusts[i] != null && Thrusts[i].IsWorking)
+					{
+						Base6Directions.Direction CockpitForward = Thrusts[i].WorldMatrix.GetClosestDirection(rm.Forward);
+						Base6Directions.Direction CockpitUp = Thrusts[i].WorldMatrix.GetClosestDirection(rm.Up);
+						Base6Directions.Direction CockpitLeft = Thrusts[i].WorldMatrix.GetClosestDirection(rm.Left);
+						switch (CockpitForward)
+						{
+							case Base6Directions.Direction.Forward:
+								ThrustOrientation[i] = Base6Directions.Direction.Forward;
+								if (ThrustForward == null || !ThrustForward.IsWorking)
+									ThrustForward = Thrusts[i];
+								break;
+							case Base6Directions.Direction.Backward:
+								ThrustOrientation[i] = Base6Directions.Direction.Backward;
+								if (ThrustBackward == null || !ThrustBackward.IsWorking)
+									ThrustBackward = Thrusts[i];
+								break;
+						}
+						switch (CockpitUp)
+						{
+							case Base6Directions.Direction.Forward:
+								ThrustOrientation[i] = Base6Directions.Direction.Up;
+								if (ThrustUp == null || !ThrustUp.IsWorking)
+									ThrustUp = Thrusts[i];
+								break;
+							case Base6Directions.Direction.Backward:
+								ThrustOrientation[i] = Base6Directions.Direction.Down;
+								if (ThrustDown == null || !ThrustDown.IsWorking)
+									ThrustDown = Thrusts[i];
+								break;
+						}
+						switch (CockpitLeft)
+						{
+							case Base6Directions.Direction.Forward:
+								ThrustOrientation[i] = Base6Directions.Direction.Left;
+								if (ThrustLeft == null || !ThrustLeft.IsWorking)
+									ThrustLeft = Thrusts[i];
+								break;
+							case Base6Directions.Direction.Backward:
+								ThrustOrientation[i] = Base6Directions.Direction.Right;
+								if (ThrustRight == null || !ThrustRight.IsWorking)
+									ThrustRight = Thrusts[i];
+								break;
+						}
+					}
+				}
+
+				//处理重力发生器
+				GravOrientation = new Base6Directions.Direction[Gravs.Count];
+				for (int i = 0; i < Gravs.Count; i++)
+				{
+					Base6Directions.Direction CockpitForward = Gravs[i].WorldMatrix.GetClosestDirection(rm.Forward);
+					Base6Directions.Direction CockpitUp = Gravs[i].WorldMatrix.GetClosestDirection(rm.Up);
+					Base6Directions.Direction CockpitLeft = Gravs[i].WorldMatrix.GetClosestDirection(rm.Left);
+					switch (CockpitForward)
+					{
+						case Base6Directions.Direction.Up:
+							GravOrientation[i] = Base6Directions.Direction.Forward;
+							break;
+						case Base6Directions.Direction.Down:
+							GravOrientation[i] = Base6Directions.Direction.Backward;
+							break;
+					}
+					switch (CockpitUp)
+					{
+						case Base6Directions.Direction.Up:
+							GravOrientation[i] = Base6Directions.Direction.Up;
+							break;
+						case Base6Directions.Direction.Down:
+							GravOrientation[i] = Base6Directions.Direction.Down;
+							break;
+					}
+					switch (CockpitLeft)
+					{
+						case Base6Directions.Direction.Up:
+							GravOrientation[i] = Base6Directions.Direction.Left;
+							break;
+						case Base6Directions.Direction.Down:
+							GravOrientation[i] = Base6Directions.Direction.Right;
+							break;
+					}
+
+				}
+
+
+				AimRatio = R;
+				AimPID_T = T;
+				AimPID_P = P;
+				AimPID_I = I;
+				AimPID_D = D;
+			}
+
+			/* ===== 运动控制相关 ===== */
+
+			public void MotionInit()
+			{
+				this.SetGyroOverride(false);
+			}
+
+			// ----- 瞄准坐标点 -----
+			// 使用PID算法，控制陀螺仪瞄准
+			// 返回是否瞄准完成
+			private List<Vector3D> Aim_PID_Data = new List<Vector3D>();
+
+			public bool AimAtPosition(Vector3D TargetPos)
+			{
+				MatrixD rm = GetRotatedMatrix(Cockpit.WorldMatrix, ShipFront);
+				MatrixD refLookAtMatrix = MatrixD.CreateLookAt(new Vector3D(), rm.Forward, rm.Up);
+				Vector3D PositionToMe = Vector3D.Normalize(Vector3D.TransformNormal(TargetPos - this.Cockpit.GetPosition(), refLookAtMatrix));
+				//储存采样点
+				if (Aim_PID_Data.Count < AimPID_T)
+				{
+					for (int i = 0; i < AimPID_T; i++)
+					{
+						Aim_PID_Data.Add(new Vector3D());
+					}
+				}
+				else { Aim_PID_Data.Remove(Aim_PID_Data[0]); Aim_PID_Data.Add(PositionToMe); }
+				//获得采样点积分
+				double X_I = 0;
+				double Y_I = 0;
+				foreach (Vector3D datapoint in Aim_PID_Data)
+				{
+					X_I += datapoint.X;
+					Y_I += datapoint.Y;
+				}
+				//计算输出
+				double YawValue = AimPID_P * (PositionToMe.X + (1 / AimPID_I) * X_I + AimPID_D * (Aim_PID_Data[AimPID_T - 1].X - Aim_PID_Data[0].X) / AimPID_T) * 30;
+				double PitchValue = AimPID_P * (PositionToMe.Y + (1 / AimPID_I) * Y_I + AimPID_D * (Aim_PID_Data[AimPID_T - 1].Y - Aim_PID_Data[0].Y) / AimPID_T) * 30;
+				this.SetGyroValue("Yaw", YawValue);
+				this.SetGyroValue("Pitch", PitchValue);
+				this.SetGyroOverride(true);
+				// 计算当前与预期瞄准点的瞄准夹角
+				Vector3D V_A = TargetPos - this.Cockpit.GetPosition();
+				Vector3D V_B = rm.Forward;
+				double Angle = Math.Acos(Vector3D.Dot(V_A, V_B) / (V_A.Length() * V_B.Length())) * 180 / Math.PI;
+				if (Angle <= AimRatio) { return true; }
+				else { return false; }
+			}
+
+
+			// ----- 开关陀螺仪越级 -----
+			public void SetGyroOverride(bool bOverride)
+			{ foreach (IMyGyro g in this.Gyroscopes) { g.GyroOverride = bOverride; } }
+
+			// ----- 控制陀螺仪越级 -----
+			// 传入基于主控Cockpit的Yaw Pitch Roll，自动检测所有陀螺仪执行对应控制
+			public void SetGyroValue(double Y, double P, double R)
+			{
+				for (int i = 0; i < this.Gyroscopes.Count; i++)
+				{
+					this.Gyroscopes[i].SetValue(gyroYawField[i], (float)Y * gyroYawFactor[i]);
+					this.Gyroscopes[i].SetValue(gyroPitchField[i], (float)P * gyroPitchFactor[i]);
+					this.Gyroscopes[i].SetValue(gyroRollField[i], (float)R * gyroRollFactor[i]);
+				}
+			}
+
+			// ----- 控制陀螺仪越级 -----
+			// 可传入基于主控Cockpit的Yaw、Pitch、Roll中的单个轴进行控制，而不影响其他轴的状态
+			public void SetGyroValue(string Field, double Value)
+			{
+				switch (Field)
+				{
+					case ("Yaw"):
+						for (int i = 0; i < this.Gyroscopes.Count; i++)
+						{
+							this.Gyroscopes[i].SetValue(gyroYawField[i], (float)Value * gyroYawFactor[i]);
+						}
+						break;
+					case ("Pitch"):
+						for (int i = 0; i < this.Gyroscopes.Count; i++)
+						{
+							this.Gyroscopes[i].SetValue(gyroPitchField[i], (float)Value * gyroPitchFactor[i]);
+						}
+						break;
+					case ("Roll"):
+						for (int i = 0; i < this.Gyroscopes.Count; i++)
+						{
+							this.Gyroscopes[i].SetValue(gyroRollField[i], (float)Value * gyroRollFactor[i]);
+						}
+						break;
+				}
+
+			}
+
+			// ----- 控制推进器越级 -----
+
+			public void SetThrustOverride(string Direction, float Value)
+			{
+				if (Direction == "All")
+				{
+					for (int i = 0; i < Thrusts.Count; i++)
+					{
+						if (Thrusts[i] != null) Thrusts[i].ThrustOverridePercentage = Value;
+					}
+				}
+				else
+				{
+					for (int i = 0; i < Thrusts.Count; i++)
+					{
+						if (Thrusts[i] != null && ThrustOrientation[i].ToString() == Direction)
+						{
+							Thrusts[i].ThrustOverridePercentage = Value;
+						}
+					}
+				}
+			}
+
+
+			// ----- 推进器同步重力发生器 -----
+			public void GravSyncWithThrusters(Vector3D Multiplier = new Vector3D(), Vector3D ThrustVector = new Vector3D())
+			{
+				ThrustVector.X += ((ThrustForward != null ? ThrustForward.CurrentThrust / ThrustForward.MaxEffectiveThrust : 0) - (ThrustBackward != null ? ThrustBackward.CurrentThrust / ThrustBackward.MaxEffectiveThrust : 0)) * Multiplier.X;
+				ThrustVector.Y += ((ThrustLeft != null ? ThrustLeft.CurrentThrust / ThrustLeft.MaxEffectiveThrust : 0) - (ThrustRight != null ? ThrustRight.CurrentThrust / ThrustRight.MaxEffectiveThrust : 0)) * Multiplier.Y;
+				ThrustVector.Z += ((ThrustUp != null ? ThrustUp.CurrentThrust / ThrustUp.MaxEffectiveThrust : 0) - (ThrustDown != null ? ThrustDown.CurrentThrust / ThrustDown.MaxEffectiveThrust : 0)) * Multiplier.Z;
+
+				if (ThrustVector.X != ThrustVector.X) ThrustVector.X = 0;
+				if (ThrustVector.Y != ThrustVector.Y) ThrustVector.Y = 0;
+				if (ThrustVector.Z != ThrustVector.Z) ThrustVector.Z = 0;
+
+				SetGravOverride(ThrustVector);
+			}
+
+
+			// ----- 控制重力发生器 -----
+			// 传入基于主控Cockpit的前后(X轴)，左右(Y轴)，与上下(Z轴)，自动检测所有重力发生器执行对应控制
+			public void SetGravOverride(Vector3D Value)
+			{
+				for (int i = 0; i < Gravs.Count; i++)
+				{
+					/*
+					if ((Gravs[i].CustomName.Contains("室内") || Gravs[i].CustomName.Contains("Interior")) && (Value.Length() == 0 || Value.IsZero()))
+					{
+						switch (GravOrientation[i])
+						{
+							case (Base6Directions.Direction.Up):
+								Gravs[i].GravityAcceleration = -9.81f;
+								break;
+							case (Base6Directions.Direction.Down):
+								Gravs[i].GravityAcceleration = 9.81f;
+								break;
+						}
+						Gravs[i].Enabled = true;
+					}
+					else 
+					*/
+					{ 
+						switch (GravOrientation[i])
+						{
+							case (Base6Directions.Direction.Forward):
+								Gravs[i].GravityAcceleration = (float)Value.X;
+								break;
+							case (Base6Directions.Direction.Backward):
+								Gravs[i].GravityAcceleration = (float)-Value.X;
+								break;
+							case (Base6Directions.Direction.Left):
+								Gravs[i].GravityAcceleration = (float)Value.Y;
+								break;
+							case (Base6Directions.Direction.Right):
+								Gravs[i].GravityAcceleration = (float)-Value.Y;
+								break;
+							case (Base6Directions.Direction.Up):
+								Gravs[i].GravityAcceleration = (float)Value.Z;
+								break;
+							case (Base6Directions.Direction.Down):
+								Gravs[i].GravityAcceleration = (float)-Value.Z;
+								break;
+						}
+						Gravs[i].Enabled = Value.Length() != 0 && !Value.IsZero();
+					}
+				}
+			}
+
+			// ----- 控制重力发生器 -----
+			// 可传入基于主控Cockpit的Forward、Backward、Left、Right、Up、Down中的单个方向进行控制，而不影响其他方向的状态
+			public void SetGravOverride(string Field, float Value)
+			{
+				switch (Field)
+				{
+					case ("Forward"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Forward)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Backward)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					case ("Backward"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Forward)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Backward)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					case ("Left"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Left)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Right)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					case ("Right"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Left)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Right)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					case ("Up"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Up)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Down)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					case ("Down"):
+						for (int i = 0; i < Gravs.Count; i++)
+						{
+							if (GravOrientation[i] == Base6Directions.Direction.Up)
+							{
+								Gravs[i].GravityAcceleration = -Value;
+							}
+							else if (GravOrientation[i] == Base6Directions.Direction.Down)
+							{
+								Gravs[i].GravityAcceleration = Value;
+							}
+							Gravs[i].Enabled = Value != 0 && Value == Value;
+						}
+						break;
+					default:
+						break;
+				}
+			}
+			
+		}
+
+
+		public static WcPbApi api;
+		public class WcPbApi
+		{
+			private Func<IMyTerminalBlock, int, MyDetectedEntityInfo> _getWeaponTarget;
+			private Func<IMyTerminalBlock, bool> _hasCoreWeapon;
+
+			public bool Activate(IMyTerminalBlock pbBlock)
+			{
+				var dict = pbBlock.GetProperty("WcPbAPI")?.As<IReadOnlyDictionary<string, Delegate>>().GetValue(pbBlock);
+				if (dict == null) throw new Exception($"WcPbAPI failed to activate");
+				return ApiAssign(dict);
+			}
+
+			public bool ApiAssign(IReadOnlyDictionary<string, Delegate> delegates)
+			{
+				if (delegates == null)
+					return false;
+				AssignMethod(delegates, "GetWeaponTarget", ref _getWeaponTarget);
+				AssignMethod(delegates, "HasCoreWeapon", ref _hasCoreWeapon);
+				return true;
+			}
+
+			private void AssignMethod<T>(IReadOnlyDictionary<string, Delegate> delegates, string name, ref T field) where T : class
+			{
+				if (delegates == null)
+				{
+					field = null;
+					return;
+				}
+				Delegate del;
+				if (!delegates.TryGetValue(name, out del))
+					throw new Exception($"{GetType().Name} :: Couldn't find {name} delegate of type {typeof(T)}");
+				field = del as T;
+				if (field == null)
+					throw new Exception(
+						$"{GetType().Name} :: Delegate {name} is not type {typeof(T)}, instead it's: {del.GetType()}");
+			}
+			public MyDetectedEntityInfo? GetWeaponTarget(IMyTerminalBlock weapon, int weaponId = 0) =>
+				_getWeaponTarget?.Invoke(weapon, weaponId) ?? null;
+
+			public bool HasCoreWeapon(IMyTerminalBlock weapon) => _hasCoreWeapon?.Invoke(weapon) ?? false;
+		}
