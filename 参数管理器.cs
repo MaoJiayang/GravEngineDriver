@@ -30,12 +30,12 @@ namespace IngameScript
             #endregion
 
             #region 重力引擎参数
-            /// <summary>重力引擎最大出力加速度（m/s²，建议 10~30）</summary>
+            /// <summary>重力发生器最大出力加速度（m/s²，建议 10~30）</summary>
             public float 最大出力加速度 { get; set; } = 20f;
             /// <summary>速度低于此值(m/s)时停止阻尼出力，防止低速抖振</summary>
-            public float 停止阈值 { get; set; } = 0.05f;
+            public float 停止阈值 { get; set; } = 3f;
             /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
-            public int 每帧最大写入数 { get; set; } = 30;
+            public int 每帧最大写入数 { get; set; } = 10;
             #endregion
 
             #region 朝向预设
@@ -80,7 +80,7 @@ namespace IngameScript
                 注册("最大出力加速度",
                     () => 最大出力加速度.ToString(),
                     v  => { float x; if (float.TryParse(v, out x) && x > 0) 最大出力加速度 = x; },
-                    "重力引擎最大出力加速度(m/s²，建议 10~30)");
+                    "单个重力发生器最大出力加速度(m/s²，一般为9.8)");
 
                 注册("停止阈值",
                     () => 停止阈值.ToString(),
@@ -90,7 +90,7 @@ namespace IngameScript
                 注册("每帧最大写入数",
                     () => 每帧最大写入数.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 每帧最大写入数 = x; },
-                    "每帧最多写入的重力发生器数量（大船可调高，默认 30 对普通舰船等同全量）");
+                    "每帧最多写入的重力发生器数量");
 
                 注册("默认朝向",
                     () => 默认朝向,

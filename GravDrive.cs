@@ -230,7 +230,7 @@ namespace IngameScript
 
                 // 零交叉预测：利用自观测加速度（含所有外力合力，自校准）
                 // 若预测下一帧速度与当前异号，则本帧停止出力，防止过零超调
-                double velNext = vel + obsAccel * dt;
+                double velNext = vel + obsAccel * dt * 2;
                 if (vel * velNext < 0)
                     return 0;
 
