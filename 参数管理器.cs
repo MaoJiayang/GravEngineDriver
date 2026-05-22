@@ -25,25 +25,17 @@ namespace IngameScript
             #endregion
 
             #region 运行频率
-            /// <summary>主循环跳过帧数（6 = 每秒 10 次）</summary>
-            public int 跳过帧    { get; set; } = 6;
-            /// <summary>ChangeSkip 切换到的备选跳过帧（1 = 每秒 60 次）</summary>
-            public int 备选跳过帧 { get; set; } = 1;
             /// <summary>方块列表自动刷新间隔（ticks，600 = 每 10 秒）</summary>
-            public int 更新间隔  { get; set; } = 600;
+            public int 更新间隔 { get; set; } = 600;
             #endregion
 
             #region 重力引擎参数
-            /// <summary>飞船低于此速度(m/s)时重力引擎不参与推进</summary>
-            public float 速度阈值 { get; set; } = 1f;
-            /// <summary>从速度阈值到此速度(m/s)范围内重力引擎按比例出力</summary>
-            public float 比例阈值 { get; set; } = 10f;
-            /// <summary>推力同步到重力引擎的放大倍率（m/s²，建议 10~20）</summary>
-            public float 推力倍率 { get; set; } = 10f;
-            /// <summary>手动操控时额外叠加的重力方向增益（m/s²，建议 5~15）</summary>
-            public float 操控增益 { get; set; } = 10f;
-            /// <summary>始终叠加的额外重力向量：前后, 左右, 上下（m/s²，默认全 0）</summary>
-            public Vector3D 额外重力 { get; set; } = Vector3D.Zero;
+            /// <summary>重力引擎最大出力加速度（m/s²，建议 10~30）</summary>
+            public float 最大出力加速度 { get; set; } = 20f;
+            /// <summary>速度低于此值(m/s)时停止阻尼出力，防止低速抖振</summary>
+            public float 停止阈值 { get; set; } = 0.05f;
+            /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
+            public int 每帧最大写入数 { get; set; } = 30;
             #endregion
 
             #region 朝向预设
@@ -51,6 +43,15 @@ namespace IngameScript
             public string 默认朝向 { get; set; } = "Front";
             /// <summary>ChangeFacing 切换到的备选朝向</summary>
             public string 备选朝向 { get; set; } = "Left";
+            #endregion
+
+            #region 性能显示
+            /// <summary>显示器每隔多少 tick 刷新一次（6 ≈ 10 Hz）</summary>
+            public int 显示刷新间隔 { get; set; } = 6;
+            /// <summary>耗时滚动平均的窗口大小（帧数）</summary>
+            public int 滚动窗口大小 { get; set; } = 60;
+            /// <summary>性能面板名称（留空则仅用 Echo，非空则额外推送到对应 LCD）</summary>
+            public string 性能显示面板名称 { get; set; } = "";
             #endregion
 
             // ── 2. 注册系统（框架层）──────────────────────────────────────────
@@ -71,45 +72,25 @@ namespace IngameScript
                     v  => 驾驶舱组 = v,
                     "驾驶舱所在分组名，留空则搜索全舰");
 
-                注册("跳过帧",
-                    () => 跳过帧.ToString(),
-                    v  => { int x; if (int.TryParse(v, out x) && x > 0) 跳过帧 = x; },
-                    "主循环跳过帧数（6 = 每秒 10 次）");
-
-                注册("备选跳过帧",
-                    () => 备选跳过帧.ToString(),
-                    v  => { int x; if (int.TryParse(v, out x) && x > 0) 备选跳过帧 = x; },
-                    "ChangeSkip 切换到的备选跳过帧（1 = 每秒 60 次）");
-
                 注册("更新间隔",
                     () => 更新间隔.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 更新间隔 = x; },
                     "方块列表自动刷新间隔（ticks，600 = 每 10 秒）");
 
-                注册("速度阈值",
-                    () => 速度阈值.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x)) 速度阈值 = x; },
-                    "飞船低于此速度(m/s)时重力引擎不参与推进");
+                注册("最大出力加速度",
+                    () => 最大出力加速度.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 最大出力加速度 = x; },
+                    "重力引擎最大出力加速度(m/s²，建议 10~30)");
 
-                注册("比例阈值",
-                    () => 比例阈值.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 比例阈值 = x; },
-                    "从速度阈值到此速度(m/s)范围内重力引擎按比例出力");
+                注册("停止阈值",
+                    () => 停止阈值.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x >= 0) 停止阈值 = x; },
+                    "速度低于此值(m/s)时停止阻尼出力，防止低速抖振");
 
-                注册("推力倍率",
-                    () => 推力倍率.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x >= 0) 推力倍率 = x; },
-                    "推力同步到重力引擎的放大倍率(m/s²，建议 10~20)");
-
-                注册("操控增益",
-                    () => 操控增益.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x >= 0) 操控增益 = x; },
-                    "手动操控时额外叠加的重力方向增益(m/s²，建议 5~15)");
-
-                注册("额外重力",
-                    () => FormatV3(额外重力),
-                    v  => { Vector3D? r = ParseV3(v); if (r.HasValue) 额外重力 = r.Value; },
-                    "始终叠加的额外重力向量：前后, 左右, 上下 (m/s²)，默认 0, 0, 0");
+                注册("每帧最大写入数",
+                    () => 每帧最大写入数.ToString(),
+                    v  => { int x; if (int.TryParse(v, out x) && x > 0) 每帧最大写入数 = x; },
+                    "每帧最多写入的重力发生器数量（大船可调高，默认 30 对普通舰船等同全量）");
 
                 注册("默认朝向",
                     () => 默认朝向,
@@ -120,6 +101,21 @@ namespace IngameScript
                     () => 备选朝向,
                     v  => 备选朝向 = v.Trim(),
                     "ChangeFacing 切换到的备选朝向");
+
+                注册("显示刷新间隔",
+                    () => 显示刷新间隔.ToString(),
+                    v  => { int x; if (int.TryParse(v, out x) && x > 0) 显示刷新间隔 = x; },
+                    "显示器每隔多少 tick 刷新一次（6 ≈ 10 Hz）");
+
+                注册("滚动窗口大小",
+                    () => 滚动窗口大小.ToString(),
+                    v  => { int x; if (int.TryParse(v, out x) && x > 0) 滚动窗口大小 = x; },
+                    "耗时滚动平均的窗口大小（帧数，60 = 最近 1 秒均值）");
+
+                注册("性能显示面板名称",
+                    () => 性能显示面板名称,
+                    v  => 性能显示面板名称 = v.Trim(),
+                    "性能面板名称（留空仅用 Echo，非空额外推送到对应 LCD）");
             }
 
             // ── 3. 构造函数（框架层）──────────────────────────────────────────
@@ -173,24 +169,6 @@ namespace IngameScript
             void 注册(string key, Func<string> get, Action<string> set, string desc = "")
             {
                 注册表[key] = new 参数描述符(get, set, desc);
-            }
-
-            // ── 5. 辅助方法 ───────────────────────────────────────────────────
-
-            static string FormatV3(Vector3D v)
-                => v.X + ", " + v.Y + ", " + v.Z;
-
-            static Vector3D? ParseV3(string s)
-            {
-                if (string.IsNullOrWhiteSpace(s)) return null;
-                string[] p = s.Split(',');
-                if (p.Length != 3) return null;
-                double x, y, z;
-                if (double.TryParse(p[0].Trim(), out x) &&
-                    double.TryParse(p[1].Trim(), out y) &&
-                    double.TryParse(p[2].Trim(), out z))
-                    return new Vector3D(x, y, z);
-                return null;
             }
         }
 
