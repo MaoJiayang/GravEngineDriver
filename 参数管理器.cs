@@ -46,8 +46,8 @@ namespace IngameScript
             #endregion
 
             #region 性能显示
-            /// <summary>显示器每隔多少 tick 刷新一次（6 ≈ 10 Hz）</summary>
-            public int 显示刷新间隔 { get; set; } = 6;
+            /// <summary>显示器每隔多少 tick 刷新一次（5 ≈ 12 Hz）</summary>
+            public int 显示刷新间隔 { get; set; } = 5;
             /// <summary>耗时滚动平均的窗口大小（帧数）</summary>
             public int 滚动窗口大小 { get; set; } = 60;
             /// <summary>性能面板名称（留空则仅用 Echo，非空则额外推送到对应 LCD）</summary>

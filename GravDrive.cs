@@ -23,6 +23,8 @@ namespace IngameScript
 
             // ── 重力发生器方向映射 ─────────────────────────────────────────────
             Base6Directions.Direction[] GravOrientation;
+            // 每轴贡献的发生器总数（X=前后, Y=左右, Z=上下），至少为 1 防除零
+            int[] _axisCount;
 
             // ── 旋转后的驾驶舱参考矩阵（支持非前向安装朝向）────────────────────
             // 每帧由 Apply() 实时重建，确保转向后仍正确投影速度
@@ -38,7 +40,7 @@ namespace IngameScript
             GravGenState[] _state;
 
             // ── 观测加速度（自校准，含所有外力合力）──────────────────────────
-            Vector3D _prevLocalVel;
+            Vector3D _prevWorldVel;    // 上帧世界系速度（世界系存储，避免参考系旋转引入虚假加速度）
             Vector3D _obsAccelLocal;
             bool     _firstFrame = true;
 
@@ -80,6 +82,27 @@ namespace IngameScript
                         case Base6Directions.Direction.Down: GravOrientation[i] = Base6Directions.Direction.Right; break;
                     }
                 }
+
+                // 统计每轴方向的发生器数量（Forward+Backward 同属 X 轴，以此类推）
+                int cntX = 0, cntY = 0, cntZ = 0;
+                for (int i = 0; i < Gravs.Count; i++)
+                {
+                    switch (GravOrientation[i])
+                    {
+                        case Base6Directions.Direction.Forward:
+                        case Base6Directions.Direction.Backward: cntX++; break;
+                        case Base6Directions.Direction.Left:
+                        case Base6Directions.Direction.Right:    cntY++; break;
+                        case Base6Directions.Direction.Up:
+                        case Base6Directions.Direction.Down:     cntZ++; break;
+                    }
+                }
+                _axisCount = new int[3]
+                {
+                    Math.Max(1, cntX),
+                    Math.Max(1, cntY),
+                    Math.Max(1, cntZ)
+                };
 
                 // 初始化状态数组，首次关闭所有发生器
                 _state = new GravGenState[Gravs.Count];
@@ -127,15 +150,22 @@ namespace IngameScript
                     Vector3D.Dot(worldVel, _rm.Up));
 
                 // 更新观测加速度（自校准，包含所有外力合力，用于零交叉预测）
+                // 在世界系求速度差后再投影，避免飞船转向时参考系旋转引入虚假加速度
                 if (_firstFrame || dt < 1e-6)
                 {
                     _obsAccelLocal = Vector3D.Zero;
                     _firstFrame    = false;
                 }
                 else
-                    _obsAccelLocal = (localVel - _prevLocalVel) / dt;
+                {
+                    Vector3D worldAccel = (worldVel - _prevWorldVel) / dt;
+                    _obsAccelLocal = new Vector3D(
+                        Vector3D.Dot(worldAccel, _rm.Forward),
+                        Vector3D.Dot(worldAccel, _rm.Left),
+                        Vector3D.Dot(worldAccel, _rm.Up));
+                }
 
-                _prevLocalVel = localVel;
+                _prevWorldVel = worldVel;
 
                 // MoveIndicator → 驱动器局部坐标，夹紧到 [-1, 1]（防高灵敏度溢出）
                 Vector3D input = new Vector3D(
@@ -143,25 +173,26 @@ namespace IngameScript
                     MathHelper.Clamp(moveIndicator.X,  -1f, 1f),   // X  = 左右
                     MathHelper.Clamp(-moveIndicator.Y, -1f, 1f));  // -Y = 上下
 
-                // 各轴期望加速度
+                // 各轴期望加速度（传入轴向总加速度能力 = 单发生器值 × 该轴发生器数量）
                 Vector3D desired = new Vector3D(
-                    ComputeAxis(input.X, localVel.X, _obsAccelLocal.X, dampenersOn, maxAccel, stopThreshold, dt),
-                    ComputeAxis(input.Y, localVel.Y, _obsAccelLocal.Y, dampenersOn, maxAccel, stopThreshold, dt),
-                    ComputeAxis(input.Z, localVel.Z, _obsAccelLocal.Z, dampenersOn, maxAccel, stopThreshold, dt));
+                    ComputeAxis(input.X, localVel.X, _obsAccelLocal.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, dt),
+                    ComputeAxis(input.Y, localVel.Y, _obsAccelLocal.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, dt),
+                    ComputeAxis(input.Z, localVel.Z, _obsAccelLocal.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, dt));
 
                 // 映射到各重力发生器的期望 GravityAcceleration，标记脏位
                 for (int i = 0; i < Gravs.Count; i++)
                 {
+                    // desired 是轴向总加速度，分摊到该轴每个发生器
                     float newDesired;
                     switch (GravOrientation[i])
                     {
-                        case Base6Directions.Direction.Forward:  newDesired = (float) desired.X; break;
-                        case Base6Directions.Direction.Backward: newDesired = (float)-desired.X; break;
-                        case Base6Directions.Direction.Left:     newDesired = (float) desired.Y; break;
-                        case Base6Directions.Direction.Right:    newDesired = (float)-desired.Y; break;
-                        case Base6Directions.Direction.Up:       newDesired = (float) desired.Z; break;
-                        case Base6Directions.Direction.Down:     newDesired = (float)-desired.Z; break;
-                        default:                                 newDesired = 0f;                break;
+                        case Base6Directions.Direction.Forward:  newDesired = (float)( desired.X / _axisCount[0]); break;
+                        case Base6Directions.Direction.Backward: newDesired = (float)(-desired.X / _axisCount[0]); break;
+                        case Base6Directions.Direction.Left:     newDesired = (float)( desired.Y / _axisCount[1]); break;
+                        case Base6Directions.Direction.Right:    newDesired = (float)(-desired.Y / _axisCount[1]); break;
+                        case Base6Directions.Direction.Up:       newDesired = (float)( desired.Z / _axisCount[2]); break;
+                        case Base6Directions.Direction.Down:     newDesired = (float)(-desired.Z / _axisCount[2]); break;
+                        default:                                 newDesired = 0f;                                   break;
                     }
                     if (Math.Abs(newDesired - _state[i].Desired) > 1e-4f)
                     {
@@ -236,20 +267,22 @@ namespace IngameScript
                 if (absVel < stopThreshold)
                     return 0; // 死区：已接近静止，停止出力防低速抖振
 
-                // 零交叉预测：利用自观测加速度（含所有外力合力，自校准）
-                // 若预测下一帧速度与当前异号，则本帧停止出力，防止过零超调
-                double velNext = vel + obsAccel * dt * 2;
-                if (vel * velNext < 0)
-                    return 0;
-
-                // 比例刹车：低速时缩力为"恰好一帧停止"，消除超调振荡；
-                // 高速时仍全力刹车（min 确保不超过 maxAccel）。
-                // 注意：此处正号是正确的——desired 坐标系中 Sign(vel) 对应反向推力，
-                // 因为 MoveIndicator.Z=-1 对应前进，整个坐标系符号已反转。
-                double brakingAccel = (dt > 1e-6)
-                    ? Math.Min(maxAccel, absVel / dt)
-                    : maxAccel;
-                return brakingAccel * Math.Sign(vel);
+                // 高速段：bang-bang 全力制动 + 零交叉预测（防外力已在帮你减速时叠加出力）
+                // 低速段（absVel < maxAccel*dt）：改用比例刹车，输出恰好一帧停止所需的力，
+                //   天然不产生零交叉，也不依赖含自身输出的 obsAccel，彻底消除近零振荡。
+                if (absVel >= maxAccel * dt)
+                {
+                    // 高速：bang-bang，但用外力零交叉预测防止外力叠加过冲
+                    double velNext = vel + obsAccel * dt;
+                    if (vel * velNext <= 0)
+                        return 0;
+                    return maxAccel * Math.Sign(vel);
+                }
+                else
+                {
+                    // 低速：比例刹车，恰好一帧停止，Sign(vel) 含义与 bang-bang 相同
+                    return (dt > 1e-6 ? absVel / dt : maxAccel) * Math.Sign(vel);
+                }
             }
         }
     }

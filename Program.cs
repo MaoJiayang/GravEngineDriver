@@ -173,7 +173,7 @@ namespace IngameScript
                 sb.AppendLine($"写入：{驱动.LastWrites}/{参数.每帧最大写入数}  待写：{驱动.PendingWrites}");
 
             double avgUs = _perfSum / _perfBuf.Length;
-            sb.AppendLine($"耗时：{Math.Round(avgUs)} μs (avg{_perfBuf.Length}f)");
+            sb.AppendLine($"耗时：{Math.Round(avgUs)} us (avg{_perfBuf.Length}f)");
             sb.AppendLine($"指令数：{Runtime.CurrentInstructionCount}/{Runtime.MaxInstructionCount}");
 
             string text = sb.ToString();
