@@ -11,7 +11,7 @@ namespace IngameScript
         /// <summary>
         /// 重力引擎驱动器：
         ///   - 以驾驶舱 MoveIndicator 为输入信号驱动出力；
-        ///   - 独立惯性阻尼（自观测加速度 + 零交叉预测）；
+        ///   - 独立惯性阻尼（bang-bang 制动 + 近零比例刹车）；
         ///   - 写入预算：每帧最多写 N 个发生器，削峰平谷。
         /// </summary>
         public class GravDrive
@@ -39,11 +39,6 @@ namespace IngameScript
                 public bool  Dirty;    // 是否需要写入
             }
             GravGenState[] _state;
-
-            // ── 观测加速度（自校准，含所有外力合力）──────────────────────────
-            Vector3D _prevWorldVel;    // 上帧世界系速度（世界系存储，避免参考系旋转引入虚假加速度）
-            Vector3D _obsAccelLocal;
-            bool     _firstFrame = true;
 
             // ── 对外只读状态（供性能显示器使用）─────────────────────────────
             public int LastWrites    { get; private set; }
@@ -150,24 +145,6 @@ namespace IngameScript
                     Vector3D.Dot(worldVel, _rm.Left),
                     Vector3D.Dot(worldVel, _rm.Up));
 
-                // 更新观测加速度（自校准，包含所有外力合力，用于零交叉预测）
-                // 在世界系求速度差后再投影，避免飞船转向时参考系旋转引入虚假加速度
-                if (_firstFrame || dt < 1e-6)
-                {
-                    _obsAccelLocal = Vector3D.Zero;
-                    _firstFrame    = false;
-                }
-                else
-                {
-                    Vector3D worldAccel = (worldVel - _prevWorldVel) / dt;
-                    _obsAccelLocal = new Vector3D(
-                        Vector3D.Dot(worldAccel, _rm.Forward),
-                        Vector3D.Dot(worldAccel, _rm.Left),
-                        Vector3D.Dot(worldAccel, _rm.Up));
-                }
-
-                _prevWorldVel = worldVel;
-
                 // MoveIndicator → 驱动器局部坐标，夹紧到 [-1, 1]（防高灵敏度溢出）
                 Vector3D input = new Vector3D(
                     MathHelper.Clamp(moveIndicator.Z,  -1f, 1f),   // Z  = 前后
@@ -176,9 +153,9 @@ namespace IngameScript
 
                 // 各轴期望加速度（传入轴向总加速度能力 = 单发生器值 × 该轴发生器数量）
                 Vector3D desired = new Vector3D(
-                    ComputeAxis(input.X, localVel.X, _obsAccelLocal.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, dt),
-                    ComputeAxis(input.Y, localVel.Y, _obsAccelLocal.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, dt),
-                    ComputeAxis(input.Z, localVel.Z, _obsAccelLocal.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, dt));
+                    ComputeAxis(input.X, localVel.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, dt),
+                    ComputeAxis(input.Y, localVel.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, dt),
+                    ComputeAxis(input.Z, localVel.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, dt));
 
                 // 映射到各重力发生器的期望 GravityAcceleration，标记脏位
                 for (int i = 0; i < Gravs.Count; i++)
@@ -261,7 +238,6 @@ namespace IngameScript
                     _state[i].Enabled = false;
                     _state[i].Dirty   = false;
                 }
-                _firstFrame   = true; // 重置观测加速度（下次接管时重新校准）
                 LastWrites    = Gravs.Count;
                 PendingWrites = 0;
             }
@@ -270,9 +246,9 @@ namespace IngameScript
 
             /// <summary>
             /// 计算单轴期望加速度。
-            /// 三段逻辑：有输入 → 全力跟随；无输入+阻尼开 → 全力刹车（含零交叉预测）；无输入+阻尼关 → 零。
+            /// 三段逻辑：有输入→跟随；无输入+阻尼开→刹车（高速bang-bang / 低速比例）；无输入+阻尼关→零。
             /// </summary>
-            static double ComputeAxis(double input, double vel, double obsAccel,
+            static double ComputeAxis(double input, double vel,
                                       bool dampeners, double maxAccel, double stopThreshold, double dt)
             {
                 // 有输入：最大力量跟随输入方向
@@ -286,24 +262,13 @@ namespace IngameScript
                 // 无输入 + 阻尼开启：刹车
                 double absVel = Math.Abs(vel);
                 if (absVel < stopThreshold)
-                    return 0; // 死区：已接近静止，停止出力防低速抖振
+                    return 0;
 
-                // 高速段：bang-bang 全力制动 + 零交叉预测（防外力已在帮你减速时叠加出力）
-                // 低速段（absVel < maxAccel*dt）：改用比例刹车，输出恰好一帧停止所需的力，
-                //   天然不产生零交叉，也不依赖含自身输出的 obsAccel，彻底消除近零振荡。
+                // 高速段：纯 bang-bang 全力制动；低速段：比例刹车恰好一帧停止
                 if (absVel >= maxAccel * dt)
-                {
-                    // 高速：bang-bang，但用外力零交叉预测防止外力叠加过冲
-                    double velNext = vel + obsAccel * dt;
-                    if (vel * velNext <= 0)
-                        return 0;
                     return maxAccel * Math.Sign(vel);
-                }
                 else
-                {
-                    // 低速：比例刹车，恰好一帧停止，Sign(vel) 含义与 bang-bang 相同
                     return (dt > 1e-6 ? absVel / dt : maxAccel) * Math.Sign(vel);
-                }
             }
         }
     }

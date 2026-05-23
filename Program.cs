@@ -134,12 +134,11 @@ namespace IngameScript
                 return;
             }
 
-            double dt        = Runtime.TimeSinceLastRun.TotalSeconds;
             Vector3D worldVel = Cs0.GetShipVelocities().LinearVelocity;
             bool dampeners    = Cs0.DampenersOverride;
 
             驱动.Apply(Cs0.MoveIndicator, worldVel, dampeners,
-                      参数.最大出力加速度, 参数.停止阈值, dt);
+                      参数.最大出力加速度, 参数.停止阈值, 参数.更新时间步长);
             驱动.FlushWrites(参数.每帧最大写入数);
         }
 

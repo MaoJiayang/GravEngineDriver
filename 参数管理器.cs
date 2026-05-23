@@ -27,6 +27,8 @@ namespace IngameScript
             #region 运行频率
             /// <summary>方块列表自动刷新间隔（ticks，600 = 每 10 秒）</summary>
             public int 更新间隔 { get; set; } = 600;
+            /// <summary>物理时间步长（s，SE 物理 tick 固定 1/60）</summary>
+            public double 更新时间步长 { get; set; } = 1.0 / 60.0;
             #endregion
 
             #region 重力引擎参数
@@ -76,6 +78,11 @@ namespace IngameScript
                     () => 更新间隔.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 更新间隔 = x; },
                     "方块列表自动刷新间隔（ticks，600 = 每 10 秒）");
+
+                注册("更新时间步长",
+                    () => 更新时间步长.ToString("F6"),
+                    v  => { double x; if (double.TryParse(v, out x) && x > 0.0) 更新时间步长 = x; },
+                    "物理时间步长（s，SE 每 tick 固定 1/60 ≈ 0.016667）");
 
                 注册("最大出力加速度",
                     () => 最大出力加速度.ToString(),
