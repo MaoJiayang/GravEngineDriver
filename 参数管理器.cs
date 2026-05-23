@@ -29,8 +29,6 @@ namespace IngameScript
             public float 停止阈值 { get; set; } = 0.01f;
             /// <summary>低速比例控制区间上限（m/s，低于此速度由比例控制接管）</summary>
             public float 低速区间阈值 { get; set; } = 9.8f;
-            /// <summary>低速区间比例常数（输出 = K × 速度，越大刹车越猛）</summary>
-            public float 比例常数K { get; set; } = 1f;
             #endregion
 
             #region 朝向预设
@@ -50,7 +48,7 @@ namespace IngameScript
             /// <summary>显示器每隔多少 tick 刷新一次（5 ≈ 12 Hz）</summary>
             public int 显示刷新间隔 { get; set; } = 5;
             /// <summary>耗时滚动平均的窗口大小（帧数）</summary>
-            public int 滚动窗口大小 { get; set; } = 60;
+            public int 滚动窗口大小 { get; set; } = 300;
             #endregion
 
             // ── 2. 注册系统（框架层）──────────────────────────────────────────
@@ -85,11 +83,6 @@ namespace IngameScript
                     () => 低速区间阈值.ToString(),
                     v  => { float x; if (float.TryParse(v, out x) && x > 0) 低速区间阈值 = x; },
                     "低于此速度(m/s)进入柔和刹车模式，建议 5~15");
-
-                注册("比例常数K",
-                    () => 比例常数K.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 比例常数K = x; },
-                    "柔和刹车力度，越大刹车越猛，建议 0.5~2");
 
                 注册("默认朝向",
                     () => 默认朝向,

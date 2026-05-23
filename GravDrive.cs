@@ -131,7 +131,7 @@ namespace IngameScript
             /// </summary>
             public void 计算期望(Vector3 移动指示, Vector3D 世界速度, bool 阻尼开启,
                               double 最大加速度, double 停止阈值,
-                              double 低速阈值, double 比例系数)
+                              double 低速阈值)
             {
                 // 每帧实时重建参考矩阵，确保飞船转向后速度投影仍正确
                 _参考矩阵 = 旋转矩阵(_驾驶舱.WorldMatrix, _前方);
@@ -150,9 +150,9 @@ namespace IngameScript
 
                 // 各轴期望加速度（逐轴独立，三区控制：死区 / 低速比例 / 高速全力）
                 Vector3D 期望 = new Vector3D(
-                    计算单轴(输入.X, 局部速度.X, 阻尼开启, 最大加速度 * _轴数[0], 停止阈值, 低速阈值, 比例系数),
-                    计算单轴(输入.Y, 局部速度.Y, 阻尼开启, 最大加速度 * _轴数[1], 停止阈值, 低速阈值, 比例系数),
-                    计算单轴(输入.Z, 局部速度.Z, 阻尼开启, 最大加速度 * _轴数[2], 停止阈值, 低速阈值, 比例系数));
+                    计算单轴(输入.X, 局部速度.X, 阻尼开启, 最大加速度 * _轴数[0], 停止阈值, 低速阈值),
+                    计算单轴(输入.Y, 局部速度.Y, 阻尼开启, 最大加速度 * _轴数[1], 停止阈值, 低速阈值),
+                    计算单轴(输入.Z, 局部速度.Z, 阻尼开启, 最大加速度 * _轴数[2], 停止阈值, 低速阈值));
 
                 // 映射到各重力发生器的期望 GravityAcceleration，标记脏位
                 for (int i = 0; i < 引擎列表.Count; i++)
@@ -247,7 +247,7 @@ namespace IngameScript
             /// </summary>
             static double 计算单轴(double 输入, double 速度,
                                   bool 阻尼, double 最大加速度, double 停止阈值,
-                                  double 低速阈值, double 比例系数)
+                                  double 低速阈值)
             {
                 // 有输入：最大力量跟随输入方向
                 if (Math.Abs(输入) > 0.01)
@@ -262,10 +262,11 @@ namespace IngameScript
                 if (速度绝对值 <= 停止阈值)
                     return 0;
 
-                // 低速区间：比例控制，平滑收敛到零（Sign(速度) 即制动方向，坐标系已反转）
+                // 低速区间：比例控制，K = maxAccel / 低速阈值，使输出在阈值处刚好达到满力
                 if (速度绝对值 < 低速阈值)
                 {
-                    double 比例输出 = 比例系数 * 速度;
+                    double 比例常数 = 最大加速度 / 低速阈值;
+                    double 比例输出 = 比例常数 * 速度;
                     if (Math.Abs(比例输出) > 最大加速度)
                         return 最大加速度 * Math.Sign(速度);
                     return 比例输出;
