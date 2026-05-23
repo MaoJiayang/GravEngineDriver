@@ -13,10 +13,10 @@ namespace IngameScript
         参数管理器 参数;
 
         // ── 方块列表 ──────────────────────────────────────────────────────────
-        List<IMyGravityGenerator> 重力引擎 = new List<IMyGravityGenerator>();
+        List<IMyGravityGenerator> 重力引擎   = new List<IMyGravityGenerator>();
         List<IMyShipController>   驾驶舱列表 = new List<IMyShipController>();
+        List<IMyTextPanel>        _显示屏    = new List<IMyTextPanel>();
         IMyShipController 当前驾驶舱;
-        IMyTextPanel      _显示屏;  // 可选性能显示面板（参数.性能显示面板名称 非空时查找）
 
         // ── 运行时状态 ────────────────────────────────────────────────────────
         bool   引擎开关 = true;
@@ -45,23 +45,24 @@ namespace IngameScript
         // ── 方块查找 ──────────────────────────────────────────────────────────
         void 获取方块()
         {
-            var 重力组 = GridTerminalSystem.GetBlockGroupWithName(参数.重力引擎组);
+            var 编组 = string.IsNullOrWhiteSpace(参数.自定义编组名称)
+                ? null
+                : GridTerminalSystem.GetBlockGroupWithName(参数.自定义编组名称);
+
             重力引擎.Clear();
-            if (重力组 != null) 重力组.GetBlocksOfType(重力引擎);
+            if (编组 != null) 编组.GetBlocksOfType(重力引擎);
             if (重力引擎.Count == 0) GridTerminalSystem.GetBlocksOfType(重力引擎);
 
-            var 驾驶舱组 = GridTerminalSystem.GetBlockGroupWithName(参数.驾驶舱组);
             驾驶舱列表.Clear();
-            if (驾驶舱组 != null) 驾驶舱组.GetBlocksOfType(驾驶舱列表, b => b.CanControlShip && b.IsFunctional);
+            if (编组 != null) 编组.GetBlocksOfType(驾驶舱列表, b => b.CanControlShip && b.IsFunctional);
             if (驾驶舱列表.Count == 0) GridTerminalSystem.GetBlocksOfType(驾驶舱列表, b => b.CanControlShip && b.IsFunctional);
 
             当前驾驶舱 = 驾驶舱列表.Find(x => x.IsUnderControl);
             if (当前驾驶舱 == null && 驾驶舱列表.Count > 0) 当前驾驶舱 = 驾驶舱列表[0];
 
-            // 可选 LCD 性能面板
-            _显示屏 = null;
-            if (!string.IsNullOrWhiteSpace(参数.性能显示面板名称))
-                _显示屏 = GridTerminalSystem.GetBlockWithName(参数.性能显示面板名称) as IMyTextPanel;
+            // LCD 性能面板：在编组内查找，找到几个打几个
+            _显示屏.Clear();
+            if (编组 != null) 编组.GetBlocksOfType(_显示屏);
         }
 
         void 初始化驱动()
@@ -178,8 +179,8 @@ namespace IngameScript
 
             string 显示文本 = sb.ToString();
             Echo(显示文本);
-            if (_显示屏 != null)
-                _显示屏.WriteText(显示文本);
+            foreach (var 屏 in _显示屏)
+                屏.WriteText(显示文本);
         }
     }
 }

@@ -18,30 +18,19 @@ namespace IngameScript
             // ── 1. 参数属性（声明即注册，改默认值只需改这里）─────────────────
 
             #region 方块分组
-            /// <summary>重力发生器分组名，留空则搜索全舰</summary>
-            public string 重力引擎组 { get; set; } = "Grav";
-            /// <summary>驾驶舱分组名，留空则搜索全舰</summary>
-            public string 驾驶舱组  { get; set; } = "CP";
+            /// <summary>自定义编组名称（留空则搜索全舰；填写后仅在此编组内查找方块）</summary>
+            public string 自定义编组名称 { get; set; } = "";
             #endregion
 
-            #region 运行频率
-            /// <summary>方块列表自动刷新间隔（ticks，600 = 每 10 秒）</summary>
-            public int 更新间隔 { get; set; } = 600;
-            /// <summary>物理时间步长（s，SE 物理 tick 固定 1/60）</summary>
-            public double 更新时间步长 { get; set; } = 1.0 / 60.0;
-            #endregion
-
-            #region 重力引擎参数
-            /// <summary>重力发生器最大出力加速度（m/s²，建议 10~30）</summary>
-            public float 最大出力加速度 { get; set; } = 20f;
+            #region 飞行参数
+            /// <summary>重力发生器最大出力加速度（m/s²）</summary>
+            public float 最大出力加速度 { get; set; } = 9.81f;
             /// <summary>速度低于此值(m/s)时停止阻尼出力，防止低速抖振</summary>
             public float 停止阈值 { get; set; } = 0.01f;
             /// <summary>低速比例控制区间上限（m/s，低于此速度由比例控制接管）</summary>
             public float 低速区间阈值 { get; set; } = 9.8f;
-            /// <summary>低速区间比例常数（输出 = K × 速度）</summary>
+            /// <summary>低速区间比例常数（输出 = K × 速度，越大刹车越猛）</summary>
             public float 比例常数K { get; set; } = 1f;
-            /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
-            public int 每帧最大写入数 { get; set; } = 10;
             #endregion
 
             #region 朝向预设
@@ -51,32 +40,70 @@ namespace IngameScript
             public string 备选朝向 { get; set; } = "Left";
             #endregion
 
-            #region 性能显示
+            #region 高级参数（一般无需调整）
+            /// <summary>方块列表自动刷新间隔（ticks，600 = 每 10 秒）</summary>
+            public int 更新间隔 { get; set; } = 600;
+            /// <summary>物理时间步长（s，SE 物理 tick 固定 1/60）</summary>
+            public double 更新时间步长 { get; set; } = 1.0 / 60.0;
+            /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
+            public int 每帧最大写入数 { get; set; } = 6;
             /// <summary>显示器每隔多少 tick 刷新一次（5 ≈ 12 Hz）</summary>
             public int 显示刷新间隔 { get; set; } = 5;
             /// <summary>耗时滚动平均的窗口大小（帧数）</summary>
             public int 滚动窗口大小 { get; set; } = 60;
-            /// <summary>性能面板名称（留空则仅用 Echo，非空则额外推送到对应 LCD）</summary>
-            public string 性能显示面板名称 { get; set; } = "";
             #endregion
 
             // ── 2. 注册系统（框架层）──────────────────────────────────────────
 
             Dictionary<string, 参数描述符> 注册表;
+            List<string> _注册顺序;
+            const string _高级分隔 = "!!ADVANCED!!";
 
             void 注册所有参数()
             {
-                注册表 = new Dictionary<string, 参数描述符>();
+                注册表   = new Dictionary<string, 参数描述符>();
+                _注册顺序 = new List<string>();
 
-                注册("重力引擎组",
-                    () => 重力引擎组,
-                    v  => 重力引擎组 = v,
-                    "重力发生器所在分组名，留空则搜索全舰");
+                // ── 常用参数 ──────────────────────────────────────────────
 
-                注册("驾驶舱组",
-                    () => 驾驶舱组,
-                    v  => 驾驶舱组 = v,
-                    "驾驶舱所在分组名，留空则搜索全舰");
+                注册("自定义编组名称",
+                    () => 自定义编组名称,
+                    v  => 自定义编组名称 = v.Trim(),
+                    "方块编组名，留空则搜索全舰；填写后仅在此编组内查找方块");
+
+                注册("最大出力加速度",
+                    () => 最大出力加速度.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 最大出力加速度 = x; },
+                    "单个重力发生器最大出力加速度(m/s²)");
+
+                注册("停止阈值",
+                    () => 停止阈值.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x >= 0) 停止阈值 = x; },
+                    "速度低于此值(m/s)时完全停止出力，防止低速抖振");
+
+                注册("低速区间阈值",
+                    () => 低速区间阈值.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 低速区间阈值 = x; },
+                    "低于此速度(m/s)进入柔和刹车模式，建议 5~15");
+
+                注册("比例常数K",
+                    () => 比例常数K.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 比例常数K = x; },
+                    "柔和刹车力度，越大刹车越猛，建议 0.5~2");
+
+                注册("默认朝向",
+                    () => 默认朝向,
+                    v  => 默认朝向 = v.Trim(),
+                    "飞船前方是哪个方向（Front/Back/Left/Right/Up/Down）");
+
+                注册("备选朝向",
+                    () => 备选朝向,
+                    v  => 备选朝向 = v.Trim(),
+                    "ChangeFacing 切换到的备选方向");
+
+                _注册顺序.Add(_高级分隔);
+
+                // ── 高级参数（谨慎调整）───────────────────────────────────
 
                 注册("更新间隔",
                     () => 更新间隔.ToString(),
@@ -88,55 +115,20 @@ namespace IngameScript
                     v  => { double x; if (double.TryParse(v, out x) && x > 0.0) 更新时间步长 = x; },
                     "物理时间步长（s，SE 每 tick 固定 1/60 ≈ 0.016667）");
 
-                注册("最大出力加速度",
-                    () => 最大出力加速度.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 最大出力加速度 = x; },
-                    "单个重力发生器最大出力加速度(m/s²，一般为9.8)");
-
-                注册("停止阈值",
-                    () => 停止阈值.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x >= 0) 停止阈值 = x; },
-                    "速度低于此值(m/s)时停止阻尼出力，防止低速抖振");
-
-                注册("低速区间阈值",
-                    () => 低速区间阈值.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 低速区间阈值 = x; },
-                    "低速比例控制区间上限（m/s，低于此速度由比例控制接管，建议 5~15）");
-
-                注册("比例常数K",
-                    () => 比例常数K.ToString(),
-                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 比例常数K = x; },
-                    "低速区间比例常数（输出 = K × 速度，建议 0.5~2）");
-
                 注册("每帧最大写入数",
                     () => 每帧最大写入数.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 每帧最大写入数 = x; },
-                    "每帧最多写入的重力发生器数量");
-
-                注册("默认朝向",
-                    () => 默认朝向,
-                    v  => 默认朝向 = v.Trim(),
-                    "默认飞船朝向（Front/Back/Left/Right/Up/Down）");
-
-                注册("备选朝向",
-                    () => 备选朝向,
-                    v  => 备选朝向 = v.Trim(),
-                    "ChangeFacing 切换到的备选朝向");
+                    "每帧最多写入的重力发生器数量，大船可调高");
 
                 注册("显示刷新间隔",
                     () => 显示刷新间隔.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 显示刷新间隔 = x; },
-                    "显示器每隔多少 tick 刷新一次（6 ≈ 10 Hz）");
+                    "显示器每隔多少 tick 刷新一次（5 ≈ 12 Hz）");
 
                 注册("滚动窗口大小",
                     () => 滚动窗口大小.ToString(),
                     v  => { int x; if (int.TryParse(v, out x) && x > 0) 滚动窗口大小 = x; },
                     "耗时滚动平均的窗口大小（帧数，60 = 最近 1 秒均值）");
-
-                注册("性能显示面板名称",
-                    () => 性能显示面板名称,
-                    v  => 性能显示面板名称 = v.Trim(),
-                    "性能面板名称（留空仅用 Echo，非空额外推送到对应 LCD）");
             }
 
             // ── 3. 构造函数（框架层）──────────────────────────────────────────
@@ -177,11 +169,21 @@ namespace IngameScript
                 sb.AppendLine("// 重力引擎驱动参数配置");
                 sb.AppendLine("// 修改后重新运行脚本或执行 UpdateBlocks 指令使其生效");
                 sb.AppendLine();
-                foreach (var kv in 注册表)
+                foreach (string key in _注册顺序)
                 {
-                    if (!string.IsNullOrEmpty(kv.Value.Desc))
-                        sb.AppendLine("// " + kv.Value.Desc);
-                    sb.AppendLine(kv.Key + " = " + kv.Value.Get());
+                    if (key == _高级分隔)
+                    {
+                        sb.AppendLine("// ──────────────────────────────────────────");
+                        sb.AppendLine("// 谨慎调整以下参数，除非你知道：");
+                        sb.AppendLine("//   它们是什么、如何工作、可能的影响");
+                        sb.AppendLine("// ──────────────────────────────────────────");
+                        sb.AppendLine();
+                        continue;
+                    }
+                    var kv = 注册表[key];
+                    if (!string.IsNullOrEmpty(kv.Desc))
+                        sb.AppendLine("// " + kv.Desc);
+                    sb.AppendLine(key + " = " + kv.Get());
                     sb.AppendLine();
                 }
                 return sb.ToString();
@@ -190,6 +192,7 @@ namespace IngameScript
             void 注册(string key, Func<string> get, Action<string> set, string desc = "")
             {
                 注册表[key] = new 参数描述符(get, set, desc);
+                _注册顺序.Add(key);
             }
         }
 
