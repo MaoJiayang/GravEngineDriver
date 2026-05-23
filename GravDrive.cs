@@ -17,272 +17,262 @@ namespace IngameScript
         public class GravDrive
         {
             // ── 方块引用 ──────────────────────────────────────────────────────
-            List<IMyGravityGenerator> Gravs;
-            IMyShipController _cockpit;  // 用于每帧实时更新 _rm
-            string _front;
+            List<IMyGravityGenerator> 引擎列表;
+            IMyShipController _驾驶舱;
+            string _前方;
 
             // ── 重力发生器方向映射 ─────────────────────────────────────────────
-            Base6Directions.Direction[] GravOrientation;
-            // 每轴贡献的发生器总数（X=前后, Y=左右, Z=上下），至少为 1 防除零
-            int[] _axisCount;
+            Base6Directions.Direction[] 引擎方向;
+            int[] _轴数;
 
             // ── 旋转后的驾驶舱参考矩阵（支持非前向安装朝向）────────────────────
-            // 每帧由 Apply() 实时重建，确保转向后仍正确投影速度
-            MatrixD _rm;
+            MatrixD _参考矩阵;
 
             // ── 写入预算状态数组 ───────────────────────────────────────────────
-            struct GravGenState
+            struct 发生器状态
             {
-                public float Desired;  // 本帧期望的 GravityAcceleration
-                public float Written;  // 上次实际写入的 GravityAcceleration
-                public bool  Enabled;  // 上次实际写入的 Enabled 状态
-                public bool  Dirty;    // 是否需要写入
+                public float 期望值;  // 本帧期望的 GravityAcceleration
+                public float 已写入;  // 上次实际写入的 GravityAcceleration
+                public bool  已启用;  // 上次实际写入的 Enabled 状态
+                public bool  需写入;  // 是否需要写入
             }
-            GravGenState[] _state;
+            发生器状态[] _状态;
 
-            // ── Dirty 索引队列（避免每帧 O(n) 扫描）────────────────────────
-            RingQueue<int> _dirtyQueue;
+            // ── 脏索引队列（避免每帧 O(n) 扫描）────────────────────────────
+            RingQueue<int> _脏队列;
 
             // ── 对外只读状态（供性能显示器使用）─────────────────────────────
-            public int LastWrites    { get; private set; }
-            public int PendingWrites { get; private set; }
+            public int 本次写入 { get; private set; }
+            public int 待写入   { get; private set; }
 
             // ── 构造函数 ──────────────────────────────────────────────────────
-            public GravDrive(IMyShipController cockpit,
-                             List<IMyGravityGenerator> gravs,
-                             string front = "Front")
+            public GravDrive(IMyShipController 驾驶舱,
+                             List<IMyGravityGenerator> 引擎,
+                             string 前方 = "Front")
             {
-                Gravs    = gravs;
-                _cockpit = cockpit;
-                _front   = front;
-                _rm      = GetRotatedMatrix(cockpit.WorldMatrix, front);
+                引擎列表 = 引擎;
+                _驾驶舱  = 驾驶舱;
+                _前方    = 前方;
+                _参考矩阵 = 旋转矩阵(驾驶舱.WorldMatrix, 前方);
 
                 // 处理重力发生器方向映射
-                GravOrientation = new Base6Directions.Direction[Gravs.Count];
-                for (int i = 0; i < Gravs.Count; i++)
+                引擎方向 = new Base6Directions.Direction[引擎列表.Count];
+                for (int i = 0; i < 引擎列表.Count; i++)
                 {
-                    var cf = Gravs[i].WorldMatrix.GetClosestDirection(_rm.Forward);
-                    var cu = Gravs[i].WorldMatrix.GetClosestDirection(_rm.Up);
-                    var cl = Gravs[i].WorldMatrix.GetClosestDirection(_rm.Left);
+                    var 前向 = 引擎列表[i].WorldMatrix.GetClosestDirection(_参考矩阵.Forward);
+                    var 上向 = 引擎列表[i].WorldMatrix.GetClosestDirection(_参考矩阵.Up);
+                    var 左向 = 引擎列表[i].WorldMatrix.GetClosestDirection(_参考矩阵.Left);
 
-                    switch (cf)
+                    switch (前向)
                     {
-                        case Base6Directions.Direction.Up:   GravOrientation[i] = Base6Directions.Direction.Forward;  break;
-                        case Base6Directions.Direction.Down: GravOrientation[i] = Base6Directions.Direction.Backward; break;
+                        case Base6Directions.Direction.Up:   引擎方向[i] = Base6Directions.Direction.Forward;  break;
+                        case Base6Directions.Direction.Down: 引擎方向[i] = Base6Directions.Direction.Backward; break;
                     }
-                    switch (cu)
+                    switch (上向)
                     {
-                        case Base6Directions.Direction.Up:   GravOrientation[i] = Base6Directions.Direction.Up;   break;
-                        case Base6Directions.Direction.Down: GravOrientation[i] = Base6Directions.Direction.Down; break;
+                        case Base6Directions.Direction.Up:   引擎方向[i] = Base6Directions.Direction.Up;   break;
+                        case Base6Directions.Direction.Down: 引擎方向[i] = Base6Directions.Direction.Down; break;
                     }
-                    switch (cl)
+                    switch (左向)
                     {
-                        case Base6Directions.Direction.Up:   GravOrientation[i] = Base6Directions.Direction.Left;  break;
-                        case Base6Directions.Direction.Down: GravOrientation[i] = Base6Directions.Direction.Right; break;
+                        case Base6Directions.Direction.Up:   引擎方向[i] = Base6Directions.Direction.Left;  break;
+                        case Base6Directions.Direction.Down: 引擎方向[i] = Base6Directions.Direction.Right; break;
                     }
                 }
 
                 // 统计每轴方向的发生器数量（Forward+Backward 同属 X 轴，以此类推）
-                int cntX = 0, cntY = 0, cntZ = 0;
-                for (int i = 0; i < Gravs.Count; i++)
+                int 前轴数 = 0, 左轴数 = 0, 上轴数 = 0;
+                for (int i = 0; i < 引擎列表.Count; i++)
                 {
-                    switch (GravOrientation[i])
+                    switch (引擎方向[i])
                     {
                         case Base6Directions.Direction.Forward:
-                        case Base6Directions.Direction.Backward: cntX++; break;
+                        case Base6Directions.Direction.Backward: 前轴数++; break;
                         case Base6Directions.Direction.Left:
-                        case Base6Directions.Direction.Right:    cntY++; break;
+                        case Base6Directions.Direction.Right:    左轴数++; break;
                         case Base6Directions.Direction.Up:
-                        case Base6Directions.Direction.Down:     cntZ++; break;
+                        case Base6Directions.Direction.Down:     上轴数++; break;
                     }
                 }
-                _axisCount = new int[3]
+                _轴数 = new int[3]
                 {
-                    Math.Max(1, cntX),
-                    Math.Max(1, cntY),
-                    Math.Max(1, cntZ)
+                    Math.Max(1, 前轴数),
+                    Math.Max(1, 左轴数),
+                    Math.Max(1, 上轴数)
                 };
 
-                // 初始化状态数组与 dirty 队列
-                _state      = new GravGenState[Gravs.Count];
-                _dirtyQueue = new RingQueue<int>(Gravs.Count);
-                for (int i = 0; i < Gravs.Count; i++)
-                    Gravs[i].Enabled = false;
+                // 初始化状态数组与脏队列
+                _状态   = new 发生器状态[引擎列表.Count];
+                _脏队列 = new RingQueue<int>(引擎列表.Count);
+                for (int i = 0; i < 引擎列表.Count; i++)
+                    引擎列表[i].Enabled = false;
             }
 
             // ── 矩阵旋转（用于支持非前向驾驶舱）─────────────────────────────
-            MatrixD GetRotatedMatrix(MatrixD m, string front)
+            MatrixD 旋转矩阵(MatrixD 原矩阵, string 前方)
             {
-                MatrixD n = m;
-                switch (front)
+                MatrixD 新矩阵 = 原矩阵;
+                switch (前方)
                 {
-                    case "Back":  n.Forward = m.Backward; n.Left = m.Right;   break;
-                    case "Up":    n.Forward = m.Up;  n.Up = m.Forward; n.Left = m.Right;   break;
-                    case "Down":  n.Forward = m.Down; n.Up = m.Backward; n.Left = m.Right; break;
-                    case "Left":  n.Backward = m.Right;  n.Left = m.Backward; break;
-                    case "Right": n.Backward = m.Left;   n.Left = m.Forward;  break;
+                    case "Back":  新矩阵.Forward = 原矩阵.Backward; 新矩阵.Left = 原矩阵.Right;   break;
+                    case "Up":    新矩阵.Forward = 原矩阵.Up;    新矩阵.Up = 原矩阵.Forward; 新矩阵.Left = 原矩阵.Right; break;
+                    case "Down":  新矩阵.Forward = 原矩阵.Down;  新矩阵.Up = 原矩阵.Backward; 新矩阵.Left = 原矩阵.Right; break;
+                    case "Left":  新矩阵.Backward = 原矩阵.Right;  新矩阵.Left = 原矩阵.Backward; break;
+                    case "Right": 新矩阵.Backward = 原矩阵.Left;   新矩阵.Left = 原矩阵.Forward;  break;
                 }
-                return n;
+                return 新矩阵;
             }
 
             // ── 公开方法 ──────────────────────────────────────────────────────
 
             /// <summary>
             /// 每帧调用：根据键盘输入与当前速度计算各重力发生器的期望加速度，标记脏位。
-            /// 不直接写入发生器，写入由 FlushWrites() 完成。
+            /// 不直接写入发生器，写入由 执行写入() 完成。
             /// </summary>
-            /// <param name="moveIndicator">驾驶舱 MoveIndicator（Z=前后, X=左右, Y=上下）</param>
-            /// <param name="worldVel">当前世界系线速度</param>
-            /// <param name="dampenersOn">驾驶舱 DampenersOverride 值</param>
-            /// <param name="maxAccel">最大出力加速度 (m/s²)</param>
-            /// <param name="stopThreshold">速度死区 (m/s)，低于此值停止阻尼出力</param>
-            /// <param name="lowSpeedThreshold">低速比例控制区间上限 (m/s)</param>
-            /// <param name="k">比例常数（输出 = K × 速度）</param>
-            public void Apply(Vector3 moveIndicator, Vector3D worldVel, bool dampenersOn,
-                              double maxAccel, double stopThreshold,
-                              double lowSpeedThreshold, double k)
+            public void 计算期望(Vector3 移动指示, Vector3D 世界速度, bool 阻尼开启,
+                              double 最大加速度, double 停止阈值,
+                              double 低速阈值, double 比例系数)
             {
                 // 每帧实时重建参考矩阵，确保飞船转向后速度投影仍正确
-                _rm = GetRotatedMatrix(_cockpit.WorldMatrix, _front);
+                _参考矩阵 = 旋转矩阵(_驾驶舱.WorldMatrix, _前方);
 
                 // 世界系速度 → 驱动器局部坐标（X=前后, Y=左右, Z=上下）
-                Vector3D localVel = new Vector3D(
-                    Vector3D.Dot(worldVel, _rm.Forward),
-                    Vector3D.Dot(worldVel, _rm.Left),
-                    Vector3D.Dot(worldVel, _rm.Up));
+                Vector3D 局部速度 = new Vector3D(
+                    Vector3D.Dot(世界速度, _参考矩阵.Forward),
+                    Vector3D.Dot(世界速度, _参考矩阵.Left),
+                    Vector3D.Dot(世界速度, _参考矩阵.Up));
 
                 // MoveIndicator → 驱动器局部坐标，夹紧到 [-1, 1]（防高灵敏度溢出）
-                Vector3D input = new Vector3D(
-                    MathHelper.Clamp(moveIndicator.Z,  -1f, 1f),   // Z  = 前后
-                    MathHelper.Clamp(moveIndicator.X,  -1f, 1f),   // X  = 左右
-                    MathHelper.Clamp(-moveIndicator.Y, -1f, 1f));  // -Y = 上下
+                Vector3D 输入 = new Vector3D(
+                    MathHelper.Clamp(移动指示.Z,  -1f, 1f),   // Z = 前后
+                    MathHelper.Clamp(移动指示.X,  -1f, 1f),   // X = 左右
+                    MathHelper.Clamp(-移动指示.Y, -1f, 1f));  // -Y = 上下
 
                 // 各轴期望加速度（逐轴独立，三区控制：死区 / 低速比例 / 高速全力）
-                Vector3D desired = new Vector3D(
-                    ComputeAxis(input.X, localVel.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, lowSpeedThreshold, k),
-                    ComputeAxis(input.Y, localVel.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, lowSpeedThreshold, k),
-                    ComputeAxis(input.Z, localVel.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, lowSpeedThreshold, k));
+                Vector3D 期望 = new Vector3D(
+                    计算单轴(输入.X, 局部速度.X, 阻尼开启, 最大加速度 * _轴数[0], 停止阈值, 低速阈值, 比例系数),
+                    计算单轴(输入.Y, 局部速度.Y, 阻尼开启, 最大加速度 * _轴数[1], 停止阈值, 低速阈值, 比例系数),
+                    计算单轴(输入.Z, 局部速度.Z, 阻尼开启, 最大加速度 * _轴数[2], 停止阈值, 低速阈值, 比例系数));
 
                 // 映射到各重力发生器的期望 GravityAcceleration，标记脏位
-                for (int i = 0; i < Gravs.Count; i++)
+                for (int i = 0; i < 引擎列表.Count; i++)
                 {
-                    // desired 是轴向总加速度，分摊到该轴每个发生器
-                    float newDesired;
-                    switch (GravOrientation[i])
+                    // 期望 是轴向总加速度，分摊到该轴每个发生器
+                    float 新期望值;
+                    switch (引擎方向[i])
                     {
-                        case Base6Directions.Direction.Forward:  newDesired = (float)( desired.X / _axisCount[0]); break;
-                        case Base6Directions.Direction.Backward: newDesired = (float)(-desired.X / _axisCount[0]); break;
-                        case Base6Directions.Direction.Left:     newDesired = (float)( desired.Y / _axisCount[1]); break;
-                        case Base6Directions.Direction.Right:    newDesired = (float)(-desired.Y / _axisCount[1]); break;
-                        case Base6Directions.Direction.Up:       newDesired = (float)( desired.Z / _axisCount[2]); break;
-                        case Base6Directions.Direction.Down:     newDesired = (float)(-desired.Z / _axisCount[2]); break;
-                        default:                                 newDesired = 0f;                                   break;
+                        case Base6Directions.Direction.Forward:  新期望值 = (float)( 期望.X / _轴数[0]); break;
+                        case Base6Directions.Direction.Backward: 新期望值 = (float)(-期望.X / _轴数[0]); break;
+                        case Base6Directions.Direction.Left:     新期望值 = (float)( 期望.Y / _轴数[1]); break;
+                        case Base6Directions.Direction.Right:    新期望值 = (float)(-期望.Y / _轴数[1]); break;
+                        case Base6Directions.Direction.Up:       新期望值 = (float)( 期望.Z / _轴数[2]); break;
+                        case Base6Directions.Direction.Down:     新期望值 = (float)(-期望.Z / _轴数[2]); break;
+                        default:                                 新期望值 = 0f;                              break;
                     }
-                    if (Math.Abs(newDesired - _state[i].Desired) > 1e-4f)
+                    if (Math.Abs(新期望值 - _状态[i].期望值) > 1e-4f)
                     {
-                        if (!_state[i].Dirty)
-                            _dirtyQueue.TryEnqueue(i);
-                        _state[i].Desired = newDesired;
-                        _state[i].Dirty   = true;
+                        if (!_状态[i].需写入)
+                            _脏队列.TryEnqueue(i);
+                        _状态[i].期望值 = 新期望值;
+                        _状态[i].需写入 = true;
                     }
                 }
             }
 
             /// <summary>
-            /// 每帧调用（Apply 之后）：将脏状态写入重力发生器，每帧最多写 maxCount 个。
-            /// delta 最大的项自然在本帧更早被写入（循环顺序近似），剩余留到下帧。
+            /// 每帧调用（计算期望 之后）：将脏状态写入重力发生器，每帧最多写 最大写入数 个。
             /// </summary>
-            public void FlushWrites(int maxCount)
+            public void 执行写入(int 最大写入数)
             {
-                int written = 0;
+                int 已写入数 = 0;
                 int i;
-                while (written < maxCount && _dirtyQueue.TryDequeue(out i))
+                while (已写入数 < 最大写入数 && _脏队列.TryDequeue(out i))
                 {
-                    if (!_state[i].Dirty) continue;  // 已被 ShutDown 等清除，跳过
+                    if (!_状态[i].需写入) continue;  // 已被 紧急关闭 等清除，跳过
 
-                    float v = _state[i].Desired;
-                    bool shouldEnable = Math.Abs(v) > 1e-4f;
+                    float 值 = _状态[i].期望值;
+                    bool  应启用 = Math.Abs(值) > 1e-4f;
 
-                    bool accelChanged = Math.Abs(v - _state[i].Written) > 1e-4f;
-                    bool enableChanged = shouldEnable != _state[i].Enabled;
+                    bool 加速度已变 = Math.Abs(值 - _状态[i].已写入) > 1e-4f;
+                    bool 启用已变   = 应启用 != _状态[i].已启用;
 
                     // 状态与方块当前值完全一致，跳过，不消耗写入预算
-                    if (!accelChanged && !enableChanged)
+                    if (!加速度已变 && !启用已变)
                     {
-                        _state[i].Dirty = false;
+                        _状态[i].需写入 = false;
                         continue;
                     }
 
-                    if (accelChanged)
+                    if (加速度已变)
                     {
-                        Gravs[i].GravityAcceleration = v;
-                        _state[i].Written = v;
+                        引擎列表[i].GravityAcceleration = 值;
+                        _状态[i].已写入 = 值;
                     }
-                    if (enableChanged)
+                    if (启用已变)
                     {
-                        Gravs[i].Enabled = shouldEnable;
-                        _state[i].Enabled = shouldEnable;
+                        引擎列表[i].Enabled = 应启用;
+                        _状态[i].已启用 = 应启用;
                     }
-                    _state[i].Dirty = false;
-                    written++;
+                    _状态[i].需写入 = false;
+                    已写入数++;
                 }
-                LastWrites    = written;
-                PendingWrites = _dirtyQueue.Count;
+                本次写入 = 已写入数;
+                待写入   = _脏队列.Count;
             }
 
             /// <summary>
-            /// 紧急关闭所有重力发生器（GravOn = false 时调用）。不受写入预算限制。
+            /// 紧急关闭所有重力发生器（引擎开关 = false 时调用）。不受写入预算限制。
             /// </summary>
-            public void ShutDown()
+            public void 紧急关闭()
             {
-                for (int i = 0; i < Gravs.Count; i++)
+                for (int i = 0; i < 引擎列表.Count; i++)
                 {
-                    Gravs[i].GravityAcceleration = 0f;
-                    Gravs[i].Enabled             = false;
-                    _state[i].Desired = 0f;
-                    _state[i].Written = 0f;
-                    _state[i].Enabled = false;
-                    _state[i].Dirty   = false;
+                    引擎列表[i].GravityAcceleration = 0f;
+                    引擎列表[i].Enabled             = false;
+                    _状态[i].期望值 = 0f;
+                    _状态[i].已写入 = 0f;
+                    _状态[i].已启用 = false;
+                    _状态[i].需写入 = false;
                 }
-                _dirtyQueue.Clear();
-                LastWrites    = Gravs.Count;
-                PendingWrites = 0;
+                _脏队列.Clear();
+                本次写入 = 引擎列表.Count;
+                待写入   = 0;
             }
 
             // ── 私有：单轴控制律 ───────────────────────────────────────────────
 
             /// <summary>
             /// 计算单轴期望加速度。
-            /// 三段逻辑：有输入→跟随；无输入+阻尼开→刹车（高速bang-bang / 低速比例）；无输入+阻尼关→零。
+            /// 三段逻辑：有输入→跟随；无输入+阻尼开→刹车（高速全力 / 低速比例）；无输入+阻尼关→零。
             /// </summary>
-            static double ComputeAxis(double input, double vel,
-                                      bool dampeners, double maxAccel, double stopThreshold,
-                                      double lowSpeedThreshold, double k)
+            static double 计算单轴(double 输入, double 速度,
+                                  bool 阻尼, double 最大加速度, double 停止阈值,
+                                  double 低速阈值, double 比例系数)
             {
                 // 有输入：最大力量跟随输入方向
-                if (Math.Abs(input) > 0.01)
-                    return maxAccel * Math.Sign(input);
+                if (Math.Abs(输入) > 0.01)
+                    return 最大加速度 * Math.Sign(输入);
 
                 // 无输入 + 阻尼关闭：自由漂移
-                if (!dampeners)
+                if (!阻尼)
                     return 0;
 
                 // 无输入 + 阻尼开启：刹车
-                double absVel = Math.Abs(vel);
-                if (absVel <= stopThreshold)
+                double 速度绝对值 = Math.Abs(速度);
+                if (速度绝对值 <= 停止阈值)
                     return 0;
 
-                // 低速区间：比例控制，平滑收敛到零（Sign(vel) 即制动方向，坐标系已反转）
-                if (absVel < lowSpeedThreshold)
+                // 低速区间：比例控制，平滑收敛到零（Sign(速度) 即制动方向，坐标系已反转）
+                if (速度绝对值 < 低速阈值)
                 {
-                    double propOut = k * vel;
-                    if (Math.Abs(propOut) > maxAccel)
-                        return maxAccel * Math.Sign(vel);
-                    return propOut;
+                    double 比例输出 = 比例系数 * 速度;
+                    if (Math.Abs(比例输出) > 最大加速度)
+                        return 最大加速度 * Math.Sign(速度);
+                    return 比例输出;
                 }
 
                 // 高速区间：全力制动
-                return maxAccel * Math.Sign(vel);
+                return 最大加速度 * Math.Sign(速度);
             }
         }
     }
