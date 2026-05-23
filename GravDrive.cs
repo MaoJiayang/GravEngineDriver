@@ -11,7 +11,7 @@ namespace IngameScript
         /// <summary>
         /// 重力引擎驱动器：
         ///   - 以驾驶舱 MoveIndicator 为输入信号驱动出力；
-        ///   - 独立惯性阻尼（bang-bang 制动 + 近零比例刹车）；
+        ///   - 独立惯性阻尼：死区 / 低速比例 / 高速全力 三区控制；
         ///   - 写入预算：每帧最多写 N 个发生器，削峰平谷。
         /// </summary>
         public class GravDrive
@@ -39,6 +39,9 @@ namespace IngameScript
                 public bool  Dirty;    // 是否需要写入
             }
             GravGenState[] _state;
+
+            // ── Dirty 索引队列（避免每帧 O(n) 扫描）────────────────────────
+            RingQueue<int> _dirtyQueue;
 
             // ── 对外只读状态（供性能显示器使用）─────────────────────────────
             public int LastWrites    { get; private set; }
@@ -100,8 +103,9 @@ namespace IngameScript
                     Math.Max(1, cntZ)
                 };
 
-                // 初始化状态数组，首次关闭所有发生器
-                _state = new GravGenState[Gravs.Count];
+                // 初始化状态数组与 dirty 队列
+                _state      = new GravGenState[Gravs.Count];
+                _dirtyQueue = new RingQueue<int>(Gravs.Count);
                 for (int i = 0; i < Gravs.Count; i++)
                     Gravs[i].Enabled = false;
             }
@@ -132,9 +136,11 @@ namespace IngameScript
             /// <param name="dampenersOn">驾驶舱 DampenersOverride 值</param>
             /// <param name="maxAccel">最大出力加速度 (m/s²)</param>
             /// <param name="stopThreshold">速度死区 (m/s)，低于此值停止阻尼出力</param>
-            /// <param name="dt">距上次运行的时间 (s)</param>
+            /// <param name="lowSpeedThreshold">低速比例控制区间上限 (m/s)</param>
+            /// <param name="k">比例常数（输出 = K × 速度）</param>
             public void Apply(Vector3 moveIndicator, Vector3D worldVel, bool dampenersOn,
-                              double maxAccel, double stopThreshold, double dt)
+                              double maxAccel, double stopThreshold,
+                              double lowSpeedThreshold, double k)
             {
                 // 每帧实时重建参考矩阵，确保飞船转向后速度投影仍正确
                 _rm = GetRotatedMatrix(_cockpit.WorldMatrix, _front);
@@ -151,11 +157,11 @@ namespace IngameScript
                     MathHelper.Clamp(moveIndicator.X,  -1f, 1f),   // X  = 左右
                     MathHelper.Clamp(-moveIndicator.Y, -1f, 1f));  // -Y = 上下
 
-                // 各轴期望加速度（传入轴向总加速度能力 = 单发生器值 × 该轴发生器数量）
+                // 各轴期望加速度（逐轴独立，三区控制：死区 / 低速比例 / 高速全力）
                 Vector3D desired = new Vector3D(
-                    ComputeAxis(input.X, localVel.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, dt),
-                    ComputeAxis(input.Y, localVel.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, dt),
-                    ComputeAxis(input.Z, localVel.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, dt));
+                    ComputeAxis(input.X, localVel.X, dampenersOn, maxAccel * _axisCount[0], stopThreshold, lowSpeedThreshold, k),
+                    ComputeAxis(input.Y, localVel.Y, dampenersOn, maxAccel * _axisCount[1], stopThreshold, lowSpeedThreshold, k),
+                    ComputeAxis(input.Z, localVel.Z, dampenersOn, maxAccel * _axisCount[2], stopThreshold, lowSpeedThreshold, k));
 
                 // 映射到各重力发生器的期望 GravityAcceleration，标记脏位
                 for (int i = 0; i < Gravs.Count; i++)
@@ -174,6 +180,8 @@ namespace IngameScript
                     }
                     if (Math.Abs(newDesired - _state[i].Desired) > 1e-4f)
                     {
+                        if (!_state[i].Dirty)
+                            _dirtyQueue.TryEnqueue(i);
                         _state[i].Desired = newDesired;
                         _state[i].Dirty   = true;
                     }
@@ -187,9 +195,11 @@ namespace IngameScript
             public void FlushWrites(int maxCount)
             {
                 int written = 0;
-                for (int i = 0; i < _state.Length && written < maxCount; i++)
+                int i;
+                while (written < maxCount && _dirtyQueue.TryDequeue(out i))
                 {
-                    if (!_state[i].Dirty) continue;
+                    if (!_state[i].Dirty) continue;  // 已被 ShutDown 等清除，跳过
+
                     float v = _state[i].Desired;
                     bool shouldEnable = Math.Abs(v) > 1e-4f;
 
@@ -216,12 +226,8 @@ namespace IngameScript
                     _state[i].Dirty = false;
                     written++;
                 }
-                LastWrites = written;
-
-                int pending = 0;
-                for (int i = 0; i < _state.Length; i++)
-                    if (_state[i].Dirty) pending++;
-                PendingWrites = pending;
+                LastWrites    = written;
+                PendingWrites = _dirtyQueue.Count;
             }
 
             /// <summary>
@@ -238,6 +244,7 @@ namespace IngameScript
                     _state[i].Enabled = false;
                     _state[i].Dirty   = false;
                 }
+                _dirtyQueue.Clear();
                 LastWrites    = Gravs.Count;
                 PendingWrites = 0;
             }
@@ -249,7 +256,8 @@ namespace IngameScript
             /// 三段逻辑：有输入→跟随；无输入+阻尼开→刹车（高速bang-bang / 低速比例）；无输入+阻尼关→零。
             /// </summary>
             static double ComputeAxis(double input, double vel,
-                                      bool dampeners, double maxAccel, double stopThreshold, double dt)
+                                      bool dampeners, double maxAccel, double stopThreshold,
+                                      double lowSpeedThreshold, double k)
             {
                 // 有输入：最大力量跟随输入方向
                 if (Math.Abs(input) > 0.01)
@@ -261,14 +269,20 @@ namespace IngameScript
 
                 // 无输入 + 阻尼开启：刹车
                 double absVel = Math.Abs(vel);
-                if (absVel < stopThreshold)
+                if (absVel <= stopThreshold)
                     return 0;
 
-                // 高速段：纯 bang-bang 全力制动；低速段：比例刹车恰好一帧停止
-                if (absVel >= maxAccel * dt)
-                    return maxAccel * Math.Sign(vel);
-                else
-                    return (dt > 1e-6 ? absVel / dt : maxAccel) * Math.Sign(vel);
+                // 低速区间：比例控制，平滑收敛到零（Sign(vel) 即制动方向，坐标系已反转）
+                if (absVel < lowSpeedThreshold)
+                {
+                    double propOut = k * vel;
+                    if (Math.Abs(propOut) > maxAccel)
+                        return maxAccel * Math.Sign(vel);
+                    return propOut;
+                }
+
+                // 高速区间：全力制动
+                return maxAccel * Math.Sign(vel);
             }
         }
     }

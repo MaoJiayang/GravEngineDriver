@@ -35,7 +35,11 @@ namespace IngameScript
             /// <summary>重力发生器最大出力加速度（m/s²，建议 10~30）</summary>
             public float 最大出力加速度 { get; set; } = 20f;
             /// <summary>速度低于此值(m/s)时停止阻尼出力，防止低速抖振</summary>
-            public float 停止阈值 { get; set; } = 3f;
+            public float 停止阈值 { get; set; } = 0.01f;
+            /// <summary>低速比例控制区间上限（m/s，低于此速度由比例控制接管）</summary>
+            public float 低速区间阈值 { get; set; } = 9.8f;
+            /// <summary>低速区间比例常数（输出 = K × 速度）</summary>
+            public float 比例常数K { get; set; } = 1f;
             /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
             public int 每帧最大写入数 { get; set; } = 10;
             #endregion
@@ -93,6 +97,16 @@ namespace IngameScript
                     () => 停止阈值.ToString(),
                     v  => { float x; if (float.TryParse(v, out x) && x >= 0) 停止阈值 = x; },
                     "速度低于此值(m/s)时停止阻尼出力，防止低速抖振");
+
+                注册("低速区间阈值",
+                    () => 低速区间阈值.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 低速区间阈值 = x; },
+                    "低速比例控制区间上限（m/s，低于此速度由比例控制接管，建议 5~15）");
+
+                注册("比例常数K",
+                    () => 比例常数K.ToString(),
+                    v  => { float x; if (float.TryParse(v, out x) && x > 0) 比例常数K = x; },
+                    "低速区间比例常数（输出 = K × 速度，建议 0.5~2）");
 
                 注册("每帧最大写入数",
                     () => 每帧最大写入数.ToString(),
