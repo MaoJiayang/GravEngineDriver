@@ -33,8 +33,9 @@ namespace IngameScript
             // ── 写入预算状态数组 ───────────────────────────────────────────────
             struct GravGenState
             {
-                public float Desired;  // 本帧期望值
-                public float Written;  // 上次实际写入值
+                public float Desired;  // 本帧期望的 GravityAcceleration
+                public float Written;  // 上次实际写入的 GravityAcceleration
+                public bool  Enabled;  // 上次实际写入的 Enabled 状态
                 public bool  Dirty;    // 是否需要写入
             }
             GravGenState[] _state;
@@ -213,10 +214,29 @@ namespace IngameScript
                 {
                     if (!_state[i].Dirty) continue;
                     float v = _state[i].Desired;
-                    Gravs[i].GravityAcceleration = v;
-                    Gravs[i].Enabled             = Math.Abs(v) > 1e-4f;
-                    _state[i].Written            = v;
-                    _state[i].Dirty              = false;
+                    bool shouldEnable = Math.Abs(v) > 1e-4f;
+
+                    bool accelChanged = Math.Abs(v - _state[i].Written) > 1e-4f;
+                    bool enableChanged = shouldEnable != _state[i].Enabled;
+
+                    // 状态与方块当前值完全一致，跳过，不消耗写入预算
+                    if (!accelChanged && !enableChanged)
+                    {
+                        _state[i].Dirty = false;
+                        continue;
+                    }
+
+                    if (accelChanged)
+                    {
+                        Gravs[i].GravityAcceleration = v;
+                        _state[i].Written = v;
+                    }
+                    if (enableChanged)
+                    {
+                        Gravs[i].Enabled = shouldEnable;
+                        _state[i].Enabled = shouldEnable;
+                    }
+                    _state[i].Dirty = false;
                     written++;
                 }
                 LastWrites = written;
@@ -238,6 +258,7 @@ namespace IngameScript
                     Gravs[i].Enabled             = false;
                     _state[i].Desired = 0f;
                     _state[i].Written = 0f;
+                    _state[i].Enabled = false;
                     _state[i].Dirty   = false;
                 }
                 _firstFrame   = true; // 重置观测加速度（下次接管时重新校准）
