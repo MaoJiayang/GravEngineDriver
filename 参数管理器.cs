@@ -46,9 +46,9 @@ namespace IngameScript
             /// <summary>每帧最多写入的重力发生器数量（防止单帧尖峰，大船可调高）</summary>
             public int 每帧最大写入数 { get; set; } = 6;
             /// <summary>显示器每隔多少 tick 刷新一次（5 ≈ 12 Hz）</summary>
-            public int 显示刷新间隔 { get; set; } = 5;
+            public int 显示刷新间隔 { get; set; } = 179;
             /// <summary>耗时滚动平均的窗口大小（帧数）</summary>
-            public int 滚动窗口大小 { get; set; } = 300;
+            public int 滚动窗口大小 { get; set; } = 360;
             #endregion
 
             // ── 2. 注册系统（框架层）──────────────────────────────────────────

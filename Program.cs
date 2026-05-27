@@ -32,6 +32,9 @@ namespace IngameScript
         int      _耗时指针;
         double   _耗时总和;
 
+        // ── 字符串复用 ──────────────────────────────────────────────────────────
+        StringBuilder _sb = new StringBuilder();
+
         public Program()
         {
             参数     = new 参数管理器(Me);
@@ -156,28 +159,28 @@ namespace IngameScript
 
         void 更新显示()
         {
-            var sb = new StringBuilder();
-            sb.AppendLine($"重力引擎：{(引擎开关 ? "开启" : "关闭")}");
-            sb.AppendLine($"朝向：{当前朝向}");
+            _sb.Clear();
+            _sb.AppendLine($"重力引擎：{(引擎开关 ? "开启" : "关闭")}");
+            _sb.AppendLine($"朝向：{当前朝向}");
 
             if (当前驾驶舱 != null)
             {
-                sb.AppendLine($"速度：{Math.Round(当前驾驶舱.GetShipSpeed(), 1)} m/s");
-                sb.AppendLine($"阻尼：{(当前驾驶舱.DampenersOverride ? "开" : "关")}");
+                _sb.AppendLine($"速度：{Math.Round(当前驾驶舱.GetShipSpeed(), 1)} m/s");
+                _sb.AppendLine($"阻尼：{(当前驾驶舱.DampenersOverride ? "开" : "关")}");
             }
             else
-                sb.AppendLine("错误：未找到驾驶舱，请执行 UpdateBlocks");
+                _sb.AppendLine("错误：未找到驾驶舱，请执行 UpdateBlocks");
 
-            sb.AppendLine($"重力发生器：{重力引擎.Count} 个");
+            _sb.AppendLine($"重力发生器：{重力引擎.Count} 个");
 
             if (驱动 != null)
-                sb.AppendLine($"写入：{驱动.本次写入}/{参数.每帧最大写入数}  待写：{驱动.待写入}");
+                _sb.AppendLine($"写入：{驱动.本次写入}/{参数.每帧最大写入数}  待写：{驱动.待写入}");
 
             double 平均耗时 = _耗时总和 / _耗时缓冲.Length;
-            sb.AppendLine($"耗时：{Math.Round(平均耗时)} us (avg{_耗时缓冲.Length}f)");
-            sb.AppendLine($"指令数：{Runtime.CurrentInstructionCount}/{Runtime.MaxInstructionCount}");
+            _sb.AppendLine($"耗时：{Math.Round(平均耗时)} us (avg{_耗时缓冲.Length}f)");
+            _sb.AppendLine($"指令数：{Runtime.CurrentInstructionCount}/{Runtime.MaxInstructionCount}");
 
-            string 显示文本 = sb.ToString();
+            string 显示文本 = _sb.ToString();
             Echo(显示文本);
             foreach (var 屏 in _显示屏)
                 屏.WriteText(显示文本);

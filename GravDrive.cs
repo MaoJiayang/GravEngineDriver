@@ -111,6 +111,9 @@ namespace IngameScript
             // ── 矩阵旋转（用于支持非前向驾驶舱）─────────────────────────────
             MatrixD 旋转矩阵(MatrixD 原矩阵, string 前方)
             {
+                if (前方 == "Front")
+                    return 原矩阵;
+
                 MatrixD 新矩阵 = 原矩阵;
                 switch (前方)
                 {
